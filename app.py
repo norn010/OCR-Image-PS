@@ -728,8 +728,268 @@ def normalize_sql_headers(headers: list[str]) -> list[str]:
     return normalized
 
 
+def _clean_cell_for_structured(s: str) -> str:
+    if not isinstance(s, str):
+        return str(s).strip() if s is not None else ""
+    t = str(s).strip()
+    t = re.sub(r"รอบกัน", "รอบคัน", t)
+    t = re.sub(r"(\d+(?:\.\d*)?)\s+กัน\b", r"\1 คัน", t)
+    t = re.sub(r"\s*\(\s*[^)]*บาทถ้วน[^)]*\)\s*", " ", t)
+    t = re.sub(r"(60\"?x100FT)\s+(OMODA JAECOO 5)", r"\1 ซันรูฟ \2", t)
+    t = re.sub(r"\s+1-\d+\s*$", "", t)
+    t = re.sub(r"\s+\d+(?:\.\d*)?\s*คัน\s*$", "", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def extract_ocr_tables_structured(
+    html: str,
+    fallback_text: str,
+    page_htmls: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """
+    แยกผล OCR เป็น 3 ส่วน: header (หัวเอกสาร), detail (รายการสินค้า), total (สรุปเงิน).
+    คืนค่า { "header": {...}, "detail": [[...], ...], "total": {...} }
+    """
+    table_payloads = build_source_table_payloads(page_htmls or [], html)
+    merged_rows = merge_table_rows_with_source(table_payloads)
+    txt = (fallback_text or "").strip()
+
+    # Header จากข้อความ OCR
+    date_val = inv_val = sales_val = pay_val = due_val = ""
+    date_m = re.search(r"วันที่\s*(\d{1,2}/\d{1,2}/\d{4})", txt)
+    if date_m:
+        date_val = date_m.group(1).strip()
+    inv_m = re.search(r"เลขที่\s*([A-Za-z0-9\-]+)", txt)
+    if inv_m:
+        inv_val = inv_m.group(1).strip()
+    emp_m = re.search(r"พนักงานขาย\s*(.+?)(?=\n|กำหนดชำระเงิน|ครบกำหนดวันที่|$)", txt, re.DOTALL)
+    if emp_m:
+        sales_val = emp_m.group(1).replace("\n", " ").strip()[:200]
+    pay_m = re.search(r"กำหนดชำระเงิน\s*(.+?)(?=\n|ครบกำหนดวันที่|$)", txt, re.DOTALL)
+    if pay_m:
+        pay_val = pay_m.group(1).replace("\n", " ").strip()[:100]
+    due_m = re.search(r"ครบกำหนดวันที่\s*(\d{1,2}/\d{1,2}/\d{4})", txt)
+    if due_m:
+        due_val = due_m.group(1).strip()
+
+    header = {
+        "วันที่": date_val,
+        "เลขที่": inv_val,
+        "พนักงานขาย": sales_val,
+        "กำหนดชำระเงิน": pay_val,
+        "ครบกำหนดวันที่": due_val,
+    }
+
+    # Total (รวมเงิน, VAT, รวมสุทธิ)
+    total_val = vat_val = net_val = ""
+
+    def _is_summary_row(row: list) -> bool:
+        row_text = " ".join(str(c or "") for c in row).strip()
+        first_cell = str((row[0] if row else "") or "").strip()
+        if re.match(r"^\d{10,}", first_cell):
+            return False
+        if first_cell.startswith("คุณ") or re.match(r"^SA\d", first_cell):
+            return False
+        if not first_cell and re.search(r"คุณ\s+\S+|SA\d{4}-\d+/", row_text):
+            return False
+        if re.search(r"รวมเงิน\s*/?\s*TOTAL|ภาษีมูลค่าเพิ่ม\s*/?\s*VAT|รวมสุทธิ\s*/?\s*NET\s*TOTAL", row_text, re.IGNORECASE):
+            return True
+        if re.search(r"(?:แปดร้อย|เก้าร้อย|เจ็ดร้อย|หกร้อย|ห้าร้อย|สี่ร้อย|สามร้อย|สองร้อย|หนึ่งร้อย).*บาท(?:ถ้วน|เพียง|\s*สตางค์)", row_text):
+            return True
+        if re.search(r"บาท\s*สตางค์", row_text):
+            return True
+        return False
+
+    def _first_number_in_row(row: list) -> str:
+        for cell in row:
+            m = re.search(r"([\d,]+\.?\d*)", str(cell or ""))
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    if merged_rows:
+        for r in merged_rows[1:]:
+            if not _is_summary_row(r):
+                continue
+            row_text = " ".join(str(c or "") for c in r)
+            num = _first_number_in_row(r)
+            if not num:
+                continue
+            if re.search(r"รวมเงิน\s*/?\s*TOTAL", row_text, re.IGNORECASE) and "NET" not in row_text.upper():
+                if not total_val:
+                    total_val = num
+            elif re.search(r"ภาษีมูลค่าเพิ่ม\s*/?\s*VAT|VAT\b", row_text, re.IGNORECASE):
+                if not vat_val:
+                    vat_val = num
+            elif re.search(r"รวมสุทธิ\s*/?\s*NET\s*TOTAL|NET\s*TOTAL", row_text, re.IGNORECASE):
+                if not net_val:
+                    net_val = num
+    if not total_val or not vat_val or not net_val:
+        t2 = txt.replace("\n", " ")
+        total_m = re.search(r"(?:รวมเงิน|TOTAL)\s*[\s:]*([\d,]+\.?\d*)", t2, re.IGNORECASE)
+        vat_m = re.search(r"(?:ภาษีมูลค่าเพิ่ม|VAT)\s*[\s:]*([\d,]+\.?\d*)", t2, re.IGNORECASE)
+        net_m = re.search(r"(?:รวมสุทธิ|NET\s*TOTAL)\s*[\s:]*([\d,]+\.?\d*)", t2, re.IGNORECASE)
+        if total_m and not total_val:
+            total_val = total_m.group(1).strip()
+        if vat_m and not vat_val:
+            vat_val = vat_m.group(1).strip()
+        if net_m and not net_val:
+            net_val = net_m.group(1).strip()
+    if not total_val or not vat_val or not net_val:
+        if not total_val:
+            m = re.search(r"(?:รวมเงิน|TOTAL)\s*[\s:]*([\d,]+\.?\d*)", txt, re.IGNORECASE | re.DOTALL)
+            if m:
+                total_val = m.group(1).strip()
+        if not vat_val:
+            m = re.search(r"(?:ภาษีมูลค่าเพิ่ม|VAT)\s*[\s:]*([\d,]+\.?\d*)", txt, re.IGNORECASE | re.DOTALL)
+            if m:
+                vat_val = m.group(1).strip()
+        if not net_val:
+            m = re.search(r"(?:รวมสุทธิ|NET\s*TOTAL)\s*[\s:]*([\d,]+\.?\d*)", txt, re.IGNORECASE | re.DOTALL)
+            if m:
+                net_val = m.group(1).strip()
+
+    total = {
+        "เลขที่": inv_val,
+        "รวมเงิน": total_val,
+        "ภาษีมูลค่าเพิ่ม": vat_val,
+        "รวมสุทธิ": net_val,
+    }
+
+    # Detail: แถวสินค้าจาก merged_rows (กรองแถวสรุป + รวมแถวต่อเนื่อง)
+    detail: list[list[str]] = []
+    if merged_rows:
+        table1_rows = [merged_rows[0]]
+        for row in merged_rows[1:]:
+            if not _is_summary_row(row):
+                table1_rows.append(row)
+
+        def _is_product_code_cell(s: str) -> bool:
+            return bool(re.match(r"^\d{10,}", str(s or "").strip()))
+
+        desc_col = 1
+        source_ref_col = max(0, len(table1_rows[0]) - 1)
+        i = len(table1_rows) - 1
+        while i >= 1 and i < len(table1_rows):
+            row = table1_rows[i]
+            prev = table1_rows[i - 1]
+            first_cell = str((row[0] if row else "") or "").strip()
+            prev_first = str((prev[0] if prev else "") or "").strip()
+            if not _is_product_code_cell(first_cell) and _is_product_code_cell(prev_first):
+                extra = " ".join(
+                    str(c or "").strip()
+                    for ci, c in enumerate(row)
+                    if (c and str(c).strip()) and ci != source_ref_col
+                )
+                if extra:
+                    new_prev = list(prev)
+                    if desc_col >= len(new_prev):
+                        new_prev.extend([""] * (desc_col - len(new_prev) + 1))
+                    new_prev[desc_col] = ((new_prev[desc_col] or "").strip() + " " + extra).strip()
+                    table1_rows[i - 1] = new_prev
+                table1_rows.pop(i)
+            else:
+                i -= 1
+
+        # คอลัมน์: รหัสสินค้า=0, รายละเอียด=1, จำนวน=2, หน่วยละ=3, %=4, จำนวนเงิน=5
+        for row in table1_rows[1:]:
+            padded = (list(row) + [""] * 8)[:8]
+            doc_no = inv_val
+            prod_code = _clean_cell_for_structured(padded[0] if len(padded) > 0 else "")
+            desc = _clean_cell_for_structured(padded[1] if len(padded) > 1 else "")
+            qty = _clean_cell_for_structured(padded[2] if len(padded) > 2 else "")
+            unit_price = _clean_cell_for_structured(padded[3] if len(padded) > 3 else "")
+            pct = _clean_cell_for_structured(padded[4] if len(padded) > 4 else "")
+            amount = _clean_cell_for_structured(padded[5] if len(padded) > 5 else "")
+            detail.append([doc_no, prod_code, desc, qty, unit_price, pct, amount])
+
+    return {"header": header, "detail": detail, "total": total}
+
+
+def _sql_quote(name: str) -> str:
+    return f"[{name.replace(']', ']]')}]"
+
+
+def parse_preview_sheets_to_structured(sheets_payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    แปลงข้อมูลจาก Preview Excel (sheets ที่แก้แล้ว) เป็น { header, detail, total }
+    โครงสร้าง sheet: แถว 0 = หัวตาราง detail, แถว 1..n = detail, แล้วแถว "รายการ", "รวมเงิน", "VAT", "รวมสุทธิ", แล้ว "วันที่", "เลขที่", ...
+    """
+    sheets = sheets_payload.get("sheets") or []
+    if not sheets:
+        return {"header": {}, "detail": [], "total": {}}
+    rows = (sheets[0].get("rows") or []) if sheets else []
+    if len(rows) < 2:
+        return {"header": {}, "detail": [], "total": {}}
+
+    def cell(r: list, c: int) -> str:
+        return str((r[c] if c < len(r) else "") or "").strip()
+
+    # หาแถวที่เริ่มตาราง 2 (รายการ)
+    table2_start = None
+    for i in range(1, len(rows)):
+        if "รายการ" in cell(rows[i], 0):
+            table2_start = i
+            break
+    if table2_start is None:
+        table2_start = len(rows)
+
+    # total จากแถว รวมเงิน, VAT, รวมสุทธิ
+    total_val = vat_val = net_val = ""
+    if table2_start + 3 < len(rows):
+        total_val = cell(rows[table2_start + 1], 1)
+        vat_val = cell(rows[table2_start + 2], 1)
+        net_val = cell(rows[table2_start + 3], 1)
+
+    # header จากแถว วันที่, เลขที่, พนักงานขาย, กำหนดชำระเงิน, ครบกำหนดวันที่ (สแกนทั้ง sheet)
+    date_val = inv_val = sales_val = pay_val = due_val = ""
+    for j in range(len(rows)):
+        c0 = cell(rows[j], 0)
+        c1 = cell(rows[j], 1)
+        if "วันที่" in c0:
+            date_val = c1
+        elif "เลขที่" in c0 and len(c1) > 1:
+            inv_val = c1
+        elif "พนักงานขาย" in c0:
+            sales_val = c1
+        elif "กำหนดชำระเงิน" in c0:
+            pay_val = c1
+        elif "ครบกำหนดวันที่" in c0:
+            due_val = c1
+    doc_no = inv_val
+
+    # detail: แถว 1 ถึงก่อน table2_start
+    detail: list[list[str]] = []
+    for r in range(1, table2_start):
+        row = rows[r]
+        if not any(cell(row, c) for c in range(6)):
+            continue
+        prod_code = cell(row, 0)
+        desc = cell(row, 1)
+        qty = cell(row, 2)
+        unit_price = cell(row, 3)
+        pct = cell(row, 4)
+        amount = cell(row, 5)
+        detail.append([doc_no, prod_code, desc, qty, unit_price, pct, amount])
+
+    header = {
+        "วันที่": date_val,
+        "เลขที่": inv_val,
+        "พนักงานขาย": sales_val,
+        "กำหนดชำระเงิน": pay_val,
+        "ครบกำหนดวันที่": due_val,
+    }
+    total = {
+        "เลขที่": inv_val,
+        "รวมเงิน": total_val,
+        "ภาษีมูลค่าเพิ่ม": vat_val,
+        "รวมสุทธิ": net_val,
+    }
+    return {"header": header, "detail": detail, "total": total}
+
+
 def upload_result_to_sql_server(
-    result: dict[str, Any], table_name: str, db_name: str = "ExcelTtbDB"
+    result: dict[str, Any], table_name: str, db_name: str = "ExcelTtbDB", edited_sheets_json: Optional[str] = None
 ) -> dict[str, Any]:
     try:
         import pyodbc  # Local import so app can run without DB dependency.
@@ -738,17 +998,28 @@ def upload_result_to_sql_server(
             "ยังไม่ได้ติดตั้ง pyodbc ใน virtualenv นี้ กรุณารัน: pip install pyodbc"
         ) from exc
 
-    extracted_html = result.get("extracted_html", "")
-    page_htmls = result.get("page_htmls", []) or []
-    payloads = build_source_table_payloads(page_htmls, extracted_html)
-    merged_rows = merge_table_rows_with_source(payloads)
-    if not merged_rows:
-        raise ValueError("ไม่พบตารางสำหรับอัพโหลดฐานข้อมูล")
+    if edited_sheets_json:
+        try:
+            payload = json.loads(edited_sheets_json)
+            data = parse_preview_sheets_to_structured(payload)
+            if data is not None:
+                header = data.get("header") or {}
+                detail = data.get("detail") or []
+                total = data.get("total") or {}
+            else:
+                edited_sheets_json = None
+        except (json.JSONDecodeError, KeyError, TypeError):
+            edited_sheets_json = None
+    if not edited_sheets_json:
+        extracted_html = result.get("extracted_html", "")
+        extracted_text = result.get("extracted_text", "")
+        page_htmls = result.get("page_htmls", []) or []
+        data = extract_ocr_tables_structured(extracted_html, extracted_text or "", page_htmls)
+        header = data["header"]
+        detail = data["detail"]
+        total = data["total"]
 
-    headers = normalize_sql_headers([str(h) for h in merged_rows[0]])
-    data_rows = merged_rows[1:]
-
-    safe_table = sanitize_table_name(table_name)
+    safe_base = sanitize_table_name(table_name)
     safe_db = sanitize_db_name(db_name)
     master_conn_str, target_conn_str = get_sql_connection_strings(safe_db)
 
@@ -759,27 +1030,52 @@ def upload_result_to_sql_server(
 
     conn = pyodbc.connect(target_conn_str)
     cur = conn.cursor()
-    cur.execute(f"IF OBJECT_ID('dbo.{safe_table}', 'U') IS NOT NULL DROP TABLE dbo.{safe_table};")
 
-    col_defs = ", ".join([f"[{h.replace(']', ']]')}] NVARCHAR(MAX) NULL" for h in headers])
-    cur.execute(f"CREATE TABLE dbo.{safe_table} ({col_defs});")
+    # 1. ตาราง header: วันที่, เลขที่, พนักงานขาย, กำหนดชำระเงิน, ครบกำหนดวันที่
+    t_header = f"{safe_base}_header"
+    cur.execute(f"IF OBJECT_ID('dbo.[{t_header}]', 'U') IS NOT NULL DROP TABLE dbo.[{t_header}];")
+    cols_h = ["วันที่", "เลขที่", "พนักงานขาย", "กำหนดชำระเงิน", "ครบกำหนดวันที่"]
+    col_defs_h = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_h])
+    cur.execute(f"CREATE TABLE dbo.[{t_header}] ({col_defs_h});")
+    cur.execute(
+        f"INSERT INTO dbo.[{t_header}] ({', '.join(_sql_quote(c) for c in cols_h)}) VALUES (?, ?, ?, ?, ?);",
+        [header.get("วันที่", ""), header.get("เลขที่", ""), header.get("พนักงานขาย", ""), header.get("กำหนดชำระเงิน", ""), header.get("ครบกำหนดวันที่", "")],
+    )
 
-    if data_rows:
-        placeholders = ", ".join(["?"] * len(headers))
-        col_list = ", ".join([f"[{h.replace(']', ']]')}]" for h in headers])
-        insert_sql = f"INSERT INTO dbo.{safe_table} ({col_list}) VALUES ({placeholders})"
-        prepared_rows = []
-        for row in data_rows:
-            padded = list(row) + [""] * (len(headers) - len(row))
-            prepared_rows.append([None if v is None else str(v) for v in padded[: len(headers)]])
+    # 2. ตาราง detail: เลขที่, รหัสสินค้า, รายละเอียด, จำนวน, หน่วยละ, ส่วนลด, จำนวนเงิน
+    t_detail = f"{safe_base}_detail"
+    cur.execute(f"IF OBJECT_ID('dbo.[{t_detail}]', 'U') IS NOT NULL DROP TABLE dbo.[{t_detail}];")
+    cols_d = ["เลขที่", "รหัสสินค้า", "รายละเอียด", "จำนวน", "หน่วยละ", "ส่วนลด", "จำนวนเงิน"]
+    col_defs_d = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_d])
+    cur.execute(f"CREATE TABLE dbo.[{t_detail}] ({col_defs_d});")
+    if detail:
+        insert_d = f"INSERT INTO dbo.[{t_detail}] ({', '.join(_sql_quote(c) for c in cols_d)}) VALUES (?, ?, ?, ?, ?, ?, ?);"
         cur.fast_executemany = True
-        cur.executemany(insert_sql, prepared_rows)
+        cur.executemany(insert_d, [[str(v) if v is not None else "" for v in row] for row in detail])
+
+    # 3. ตาราง total: เลขที่, รวมเงิน, ภาษีมูลค่าเพิ่ม, รวมสุทธิ
+    t_total = f"{safe_base}_total"
+    cur.execute(f"IF OBJECT_ID('dbo.[{t_total}]', 'U') IS NOT NULL DROP TABLE dbo.[{t_total}];")
+    cols_t = ["เลขที่", "รวมเงิน", "ภาษีมูลค่าเพิ่ม", "รวมสุทธิ"]
+    col_defs_t = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_t])
+    cur.execute(f"CREATE TABLE dbo.[{t_total}] ({col_defs_t});")
+    cur.execute(
+        f"INSERT INTO dbo.[{t_total}] ({', '.join(_sql_quote(c) for c in cols_t)}) VALUES (?, ?, ?, ?);",
+        [total.get("เลขที่", ""), total.get("รวมเงิน", ""), total.get("ภาษีมูลค่าเพิ่ม", ""), total.get("รวมสุทธิ", "")],
+    )
 
     conn.commit()
-    cur.execute(f"SELECT COUNT(*) FROM dbo.{safe_table};")
-    inserted_rows = cur.fetchone()[0]
+    cur.execute(f"SELECT COUNT(*) FROM dbo.[{t_detail}];")
+    detail_rows = cur.fetchone()[0]
     conn.close()
-    return {"db_name": safe_db, "table_name": f"dbo.{safe_table}", "rows": int(inserted_rows)}
+    return {
+        "db_name": safe_db,
+        "table_name": f"dbo.{safe_base} (header, detail, total)",
+        "rows": 1 + int(detail_rows) + 1,
+        "header_table": f"dbo.{t_header}",
+        "detail_table": f"dbo.{t_detail}",
+        "total_table": f"dbo.{t_total}",
+    }
 
 
 def export_tables_to_docx(
@@ -1727,11 +2023,68 @@ def ocr_status(job_id: str):
     return jsonify(response)
 
 
+def check_doc_no_exists_in_db(doc_no: str, table_base: str, db_name: str) -> bool:
+    """ตรวจสอบว่า เลขที่ (doc_no) มีในตาราง header แล้วหรือยัง"""
+    if not doc_no or not table_base:
+        return False
+    try:
+        import pyodbc
+    except ModuleNotFoundError:
+        return False
+    safe_db = sanitize_db_name(db_name)
+    safe_base = sanitize_table_name(table_base)
+    t_header = f"{safe_base}_header"
+    _, target_conn_str = get_sql_connection_strings(safe_db)
+    try:
+        conn = pyodbc.connect(target_conn_str)
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT 1 FROM dbo.[{t_header}] WHERE [เลขที่] = ?;",
+            (doc_no,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return row is not None
+    except pyodbc.Error:
+        return False
+
+
+@app.route("/upload/db/check", methods=["POST"])
+def upload_db_check():
+    """ตรวจสอบว่าเลขที่จากผล OCR ซ้ำกับข้อมูลในฐานข้อมูลหรือไม่"""
+    result_id = request.form.get("result_id", "").strip()
+    table_name = request.form.get("table_name", "").strip()
+    db_name = request.form.get("db_name", "").strip()
+    if not result_id:
+        return jsonify({"ok": False, "error": "ไม่พบผลลัพธ์ OCR"}), 400
+
+    result = get_ocr_result(result_id)
+    if not result:
+        return jsonify({"ok": False, "error": "ผลลัพธ์หมดอายุหรือไม่พบ"}), 404
+
+    try:
+        data = extract_ocr_tables_structured(
+            result.get("extracted_html", ""),
+            result.get("extracted_text", "") or "",
+            result.get("page_htmls", []) or [],
+        )
+        doc_no = (data.get("header") or {}).get("เลขที่", "").strip()
+        exists = check_doc_no_exists_in_db(
+            doc_no,
+            table_name or "OCR_TTB_WEB",
+            db_name or "ExcelTtbDB",
+        )
+        return jsonify({"ok": True, "exists": exists, "doc_no": doc_no or ""})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/upload/db", methods=["POST"])
 def upload_db():
     result_id = request.form.get("result_id", "").strip()
     table_name = request.form.get("table_name", "").strip()
     db_name = request.form.get("db_name", "").strip()
+    edited_sheets_json = request.form.get("edited_sheets_json", "").strip()
     if not result_id:
         return jsonify({"ok": False, "error": "ไม่พบผลลัพธ์ OCR สำหรับอัพโหลด"}), 400
 
@@ -1740,7 +2093,9 @@ def upload_db():
         return jsonify({"ok": False, "error": "ผลลัพธ์หมดอายุหรือไม่พบในหน่วยความจำ"}), 404
 
     try:
-        upload_info = upload_result_to_sql_server(result, table_name, db_name=db_name or "ExcelTtbDB")
+        upload_info = upload_result_to_sql_server(
+            result, table_name, db_name=db_name or "ExcelTtbDB", edited_sheets_json=edited_sheets_json or None
+        )
         return jsonify({"ok": True, "upload_info": upload_info})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500

@@ -217,20 +217,7 @@
             </span>
         </div>
         <div class="mt-3 flex flex-wrap gap-2">
-          <form id="download-word-form" method="post" action="/download/word">
-            <input id="word_result_id" type="hidden" name="result_id" value="{{ result_id }}">
-            <button type="submit"
-                    class="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700">
-              ดาวน์โหลด Word
-            </button>
-          </form>
-          <form id="download-excel-form" method="post" action="/download/excel">
-            <input id="excel_result_id" type="hidden" name="result_id" value="{{ result_id }}">
-            <button type="submit"
-                    class="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700">
-              ดาวน์โหลด Excel
-            </button>
-          </form>
+          <input id="excel_result_id" type="hidden" value="{{ result_id }}">
           <button id="preview-excel-btn" type="button"
                   class="rounded-lg border border-emerald-600 bg-white px-3 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-50">
             Preview Excel
@@ -250,9 +237,12 @@
         </div>
         <div id="db-upload-message" class="mt-2 text-sm"></div>
         <div id="excel-preview-wrapper" class="mt-4 hidden rounded-xl border border-slate-200 bg-white p-4">
-          <div class="mb-2 flex items-center justify-between">
+          <div class="mb-2 flex items-center justify-between gap-2">
             <span class="text-sm font-semibold text-slate-700">Preview Excel</span>
-            <button id="excel-preview-close" type="button" class="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700" aria-label="ปิด">×</button>
+            <div class="flex items-center gap-2">
+              <button id="excel-preview-download-btn" type="button" class="rounded-lg border border-emerald-600 bg-white px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50">ดาวน์โหลด Excel</button>
+              <button id="excel-preview-close" type="button" class="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700" aria-label="ปิด">×</button>
+            </div>
           </div>
           <div id="excel-preview-loading" class="hidden py-8 text-center text-sm text-slate-500">กำลังโหลด...</div>
           <div id="excel-preview-content" class="overflow-x-auto"></div>
@@ -331,9 +321,7 @@
     const dbTableNameInput = document.getElementById("db-table-name");
     const dbUploadMessage = document.getElementById("db-upload-message");
 
-    const wordResultId = document.getElementById("word_result_id");
     const excelResultId = document.getElementById("excel_result_id");
-    const downloadExcelForm = document.getElementById("download-excel-form");
     const previewExcelBtn = document.getElementById("preview-excel-btn");
     const excelPreviewWrapper = document.getElementById("excel-preview-wrapper");
     const excelPreviewLoading = document.getElementById("excel-preview-loading");
@@ -551,7 +539,6 @@
     }
 
     function setDownloadResultId(resultId) {
-      if (wordResultId) wordResultId.value = resultId || "";
       if (excelResultId) excelResultId.value = resultId || "";
     }
 
@@ -744,18 +731,54 @@
           return;
         }
 
+        const dbNameInput = document.getElementById("db-name");
+        const body = new URLSearchParams();
+        body.append("result_id", currentResultId);
+        body.append("db_name", dbNameInput ? dbNameInput.value : "ExcelTtbDB");
+        body.append("table_name", dbTableNameInput ? dbTableNameInput.value : "OCR_TTB_WEB");
+
         uploadDbBtn.disabled = true;
         uploadDbBtn.classList.add("opacity-70", "cursor-not-allowed");
+        uploadDbBtn.textContent = "กำลังตรวจสอบ...";
+        setDbUploadMessage("กำลังตรวจสอบเลขที่ในฐานข้อมูล...");
+
+        let doUpload = true;
+        try {
+          const checkResp = await fetch("/upload/db/check", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString()
+          });
+          const checkData = await checkResp.json();
+          if (!checkResp.ok || !checkData.ok) {
+            setDbUploadMessage(checkData.error || "ตรวจสอบไม่สำเร็จ", true);
+            doUpload = false;
+          } else if (checkData.exists && checkData.doc_no) {
+            const msg = "พบเลขที่ \"" + checkData.doc_no + "\" ในฐานข้อมูลแล้ว ต้องการเขียนทับข้อมูลเดิมหรือไม่?";
+            if (!confirm(msg)) {
+              setDbUploadMessage("ยกเลิกการอัพโหลด");
+              doUpload = false;
+            }
+          }
+        } catch (err) {
+          setDbUploadMessage(err.message || "ตรวจสอบไม่สำเร็จ", true);
+          doUpload = false;
+        }
+
+        if (!doUpload) {
+          uploadDbBtn.disabled = false;
+          uploadDbBtn.classList.remove("opacity-70", "cursor-not-allowed");
+          uploadDbBtn.textContent = "อัพลงฐานข้อมูล";
+          return;
+        }
+
         uploadDbBtn.textContent = "กำลังอัพโหลด...";
         setDbUploadMessage("กำลังอัพโหลดข้อมูลลงฐานข้อมูล...");
-
+        if (excelPreviewWrapper && !excelPreviewWrapper.classList.contains("hidden") && typeof getEditedSheetsFromPreview === "function") {
+          const edited = getEditedSheetsFromPreview();
+          if (edited) body.append("edited_sheets_json", JSON.stringify(edited));
+        }
         try {
-          const body = new URLSearchParams();
-          body.append("result_id", currentResultId);
-          const dbNameInput = document.getElementById("db-name");
-          body.append("db_name", dbNameInput ? dbNameInput.value : "ExcelTtbDB");
-          body.append("table_name", dbTableNameInput ? dbTableNameInput.value : "OCR_TTB_WEB");
-
           const resp = await fetch("/upload/db", {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -766,7 +789,10 @@
             throw new Error(data.error || "อัพโหลดฐานข้อมูลไม่สำเร็จ");
           }
           const info = data.upload_info || {};
-          setDbUploadMessage(`อัพโหลดสำเร็จ: ${info.db_name || "ExcelTtbDB"} / ${info.table_name || "-"} / ${info.rows || 0} แถว`);
+          const msg = info.header_table && info.detail_table && info.total_table
+            ? `อัพโหลดสำเร็จ: ${info.db_name || ""} → ${info.header_table}, ${info.detail_table}, ${info.total_table} (${info.rows || 0} แถว)`
+            : `อัพโหลดสำเร็จ: ${info.db_name || "ExcelTtbDB"} / ${info.table_name || "-"} / ${info.rows || 0} แถว`;
+          setDbUploadMessage(msg);
         } catch (error) {
           setDbUploadMessage(error.message || "อัพโหลดฐานข้อมูลไม่สำเร็จ", true);
         } finally {
@@ -856,9 +882,9 @@
       return sheets.length ? { sheets } : null;
     }
 
-    if (previewExcelBtn && downloadExcelForm) {
+    if (previewExcelBtn) {
       previewExcelBtn.addEventListener("click", async () => {
-        const rid = excelResultId ? excelResultId.value : "";
+        const rid = (excelResultId && excelResultId.value) ? excelResultId.value : currentResultId;
         if (!rid) {
           if (excelPreviewWrapper) excelPreviewWrapper.classList.remove("hidden");
           if (excelPreviewContent) excelPreviewContent.innerHTML = "<p class=\"text-amber-600\">ยังไม่มีผลลัพธ์ OCR — กรุณารัน OCR ก่อน</p>";
@@ -868,7 +894,8 @@
         if (excelPreviewLoading) excelPreviewLoading.classList.remove("hidden");
         if (excelPreviewContent) excelPreviewContent.innerHTML = "";
         try {
-          const formData = new FormData(downloadExcelForm);
+          const formData = new FormData();
+          formData.append("result_id", rid);
           const resp = await fetch("/preview/excel", { method: "POST", body: formData });
           const data = await resp.json();
           if (!resp.ok) throw new Error(data.error || "โหลด preview ไม่สำเร็จ");
@@ -885,13 +912,18 @@
       excelPreviewClose.addEventListener("click", () => excelPreviewWrapper.classList.add("hidden"));
     }
 
-    if (downloadExcelForm) {
-      downloadExcelForm.addEventListener("submit", async (e) => {
-        const useEdited = excelPreviewWrapper && !excelPreviewWrapper.classList.contains("hidden") && getEditedSheetsFromPreview();
-        if (!useEdited) return;
-        e.preventDefault();
-        const formData = new FormData(downloadExcelForm);
-        formData.set("sheets_json", JSON.stringify(getEditedSheetsFromPreview()));
+    const excelPreviewDownloadBtn = document.getElementById("excel-preview-download-btn");
+    if (excelPreviewDownloadBtn) {
+      excelPreviewDownloadBtn.addEventListener("click", async () => {
+        const rid = (excelResultId && excelResultId.value) ? excelResultId.value : currentResultId;
+        if (!rid) {
+          alert("ยังไม่มีผลลัพธ์ OCR สำหรับดาวน์โหลด");
+          return;
+        }
+        const formData = new FormData();
+        formData.append("result_id", rid);
+        const edited = getEditedSheetsFromPreview && getEditedSheetsFromPreview();
+        if (edited) formData.append("sheets_json", JSON.stringify(edited));
         try {
           const resp = await fetch("/download/excel", { method: "POST", body: formData });
           if (!resp.ok) {

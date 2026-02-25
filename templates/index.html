@@ -48,6 +48,10 @@
       overflow-x: auto;
     }
     .markdown-result p { margin: 8px 0; }
+    .image-lightbox-scroll.content-overflow {
+      align-items: flex-start;
+      justify-content: flex-start;
+    }
     #excel-preview-content table {
       border-collapse: collapse;
       font-size: 0.8125rem;
@@ -92,13 +96,13 @@
     </div>
 
     <form method="post" enctype="multipart/form-data" class="grid gap-6 lg:grid-cols-2">
-      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section class="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-sm min-h-[26rem]">
         <h2 class="mb-4 text-lg font-semibold text-slate-900">อัปโหลดไฟล์</h2>
 
         <label
           id="dropzone"
           for="pdf_file"
-          class="flex min-h-40 cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-5 text-center transition hover:border-blue-400 hover:bg-blue-50"
+          class="flex flex-1 cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-5 text-center transition hover:border-blue-400 hover:bg-blue-50"
         >
           <div class="text-sm font-medium text-slate-700">ลากไฟล์ PDF หรือรูปสแกนมาวางที่นี่</div>
           <div class="mt-1 text-xs text-slate-500">หรือคลิกเพื่อเลือกไฟล์ (.pdf, .png, .jpg)</div>
@@ -117,90 +121,39 @@
             <button id="preview-next-btn" type="button" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">ถัดไป</button>
           </div>
         </div>
-        <div id="image-preview-wrapper" class="mt-3 hidden rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">รูปสแกน (Preview)</div>
-          <img id="image-preview" alt="Preview" class="mx-auto max-h-80 w-full max-w-md rounded border border-slate-300 bg-white object-contain">
-        </div>
-
-        <div id="pdf-only-options">
-          <div class="mt-4">
-            <label for="pdf_password" class="mb-1 block text-sm font-medium text-slate-700">รหัสผ่าน PDF (ถ้ามี)</label>
-            <input id="pdf_password" name="pdf_password" type="password" placeholder="เช่น 002034"
-                   class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
+        <div id="image-lightbox" class="fixed inset-0 z-50 hidden flex flex-col bg-black/90 p-0" aria-hidden="true">
+          <div class="flex shrink-0 items-center justify-between gap-2 border-b border-white/20 bg-black/50 px-4 py-2">
+            <div class="flex items-center gap-2">
+              <button type="button" id="image-lightbox-zoom-out" class="rounded-lg bg-white/90 px-3 py-1.5 text-sm font-bold text-slate-800 shadow hover:bg-white" title="ซูมออก">−</button>
+              <span id="image-lightbox-zoom-label" class="min-w-[4rem] text-center text-sm font-medium text-white">100%</span>
+              <button type="button" id="image-lightbox-zoom-in" class="rounded-lg bg-white/90 px-3 py-1.5 text-sm font-bold text-slate-800 shadow hover:bg-white" title="ซูมเข้า">+</button>
+              <button type="button" id="image-lightbox-zoom-reset" class="rounded-lg bg-white/70 px-2 py-1.5 text-xs text-slate-700 hover:bg-white">100%</button>
+            </div>
+            <button type="button" id="image-lightbox-close" class="rounded-full bg-white/90 p-2 text-slate-700 shadow hover:bg-white" aria-label="ปิด">×</button>
           </div>
-
-          <div class="mt-4">
-            <label for="pages" class="mb-1 block text-sm font-medium text-slate-700">Pages (optional)</label>
-            <input id="pages" name="pages" placeholder="เว้นว่าง=ทุกหน้า, เช่น 1-39 หรือ 1,2,3"
-                   class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-            <p class="mt-1 text-xs text-slate-500">โหมดปัจจุบันจะอ่านทีละหน้าเพื่อให้ข้อมูลครบมากขึ้น (อาจใช้เวลานานขึ้น)</p>
+          <div id="image-lightbox-scroll" class="image-lightbox-scroll flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+            <div id="image-lightbox-wrap" class="inline-block flex-shrink-0">
+              <img id="image-lightbox-img" alt="รูปใหญ่" class="block origin-top-left object-contain" draggable="false">
+            </div>
           </div>
         </div>
+        <button id="submit-btn" type="submit"
+                class="mt-4 w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-200">
+          เริ่ม OCR
+        </button>
       </section>
 
-      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 class="mb-4 text-lg font-semibold text-slate-900">ตั้งค่า OCR</h2>
-
-        <div class="space-y-4">
-          <div>
-            <label for="api_key" class="mb-1 block text-sm font-medium text-slate-700">Typhoon API Key</label>
-            <input id="api_key" name="api_key" type="password" placeholder="sk-..."
-                   class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-          </div>
-
-          <label class="inline-flex items-center gap-2 text-sm text-slate-700">
-            <input id="remember_api_key" type="checkbox" checked class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500">
-            จดจำ API Key
-          </label>
-
-          <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <div>
-              <label for="model" class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Model</label>
-              <input id="model" name="model" value="{{ defaults.model }}"
-                     class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-            </div>
-            <div>
-              <label for="task_type" class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Task Type</label>
-              <input id="task_type" name="task_type" value="{{ defaults.task_type }}"
-                     class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-            </div>
-            <div>
-              <label for="max_tokens" class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Max Tokens</label>
-              <input id="max_tokens" name="max_tokens" value="{{ defaults.max_tokens }}"
-                     class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-            </div>
-            <div>
-              <label for="temperature" class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Temperature</label>
-              <input id="temperature" name="temperature" value="{{ defaults.temperature }}"
-                     class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-            </div>
-            <div>
-              <label for="top_p" class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Top P</label>
-              <input id="top_p" name="top_p" value="{{ defaults.top_p }}"
-                     class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-            </div>
-            <div>
-              <label for="repetition_penalty" class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Repetition Penalty</label>
-              <input id="repetition_penalty" name="repetition_penalty" value="{{ defaults.repetition_penalty }}"
-                     class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-            </div>
-          </div>
-
-          <button id="submit-btn" type="submit"
-                  class="w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-200">
-            เริ่ม OCR
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm min-h-[20rem]">
+        <h2 class="mb-4 text-lg font-semibold text-slate-900">รูปสแกน (Preview)</h2>
+        <div id="image-preview-empty" class="flex min-h-[10rem] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
+          ยังไม่มีรูปตัวอย่าง
+        </div>
+        <div id="image-preview-wrapper" class="mt-3 hidden rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">รูปสแกน (Preview)</div>
+          <button type="button" id="image-preview-click" class="block w-full cursor-zoom-in rounded border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400">
+            <img id="image-preview" alt="Preview" class="mx-auto max-h-80 w-full max-w-md rounded object-contain">
           </button>
-          <div id="ocr-progress-box" class="hidden rounded-xl border border-blue-200 bg-blue-50 p-3">
-            <div id="ocr-progress-text" class="text-sm font-semibold text-blue-700">กำลังเริ่ม OCR...</div>
-            <div id="ocr-elapsed-realtime" class="mt-1 text-xs font-medium text-blue-600">เวลาที่ใช้: <span id="ocr-elapsed-seconds">0</span> วินาที</div>
-            <div class="mt-2 h-2 w-full rounded-full bg-blue-100">
-              <div id="ocr-progress-bar" class="h-2 rounded-full bg-blue-600 transition-all" style="width: 0%"></div>
-            </div>
-            <div class="mt-3">
-              <div class="text-xs font-semibold text-blue-700">เวลาแต่ละหน้า</div>
-              <ul id="ocr-progress-page-timings" class="mt-1 max-h-28 overflow-y-auto text-xs text-blue-800"></ul>
-            </div>
-          </div>
+          <p class="mt-1 text-center text-xs text-slate-500">คลิกเพื่อดูรูปใหญ่</p>
         </div>
       </section>
     </form>
@@ -223,10 +176,10 @@
             Preview Excel
           </button>
           <div class="flex flex-wrap items-center gap-2">
-            <input id="db-name" type="text" value="ExcelTtbDB"
+            <input id="db-name" type="text" value="OCR_DB"
                    class="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                   placeholder="ชื่อฐานข้อมูล" title="เช่น ExcelTtbDB, ExcelImportDB, OMODA">
-            <input id="db-table-name" type="text" value="OCR_TTB_WEB"
+                   placeholder="ชื่อฐานข้อมูล" title="เช่น OCR_DB,ExcelTtbDB, ExcelImportDB, OMODA">
+            <input id="db-table-name" type="text" value="INVO_FILM"
                    class="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
                    placeholder="ชื่อตาราง SQL">
             <button id="upload-db-btn" type="button"
@@ -295,14 +248,13 @@
     const previewWrapper = document.getElementById("pdf-preview-wrapper");
     const previewCanvas = document.getElementById("pdf-preview-canvas");
     const previewStatus = document.getElementById("pdf-preview-status");
-    const pdfPasswordInput = document.getElementById("pdf_password");
     const previewControls = document.getElementById("pdf-preview-controls");
     const previewPrevBtn = document.getElementById("preview-prev-btn");
     const previewNextBtn = document.getElementById("preview-next-btn");
     const previewPageInfo = document.getElementById("preview-page-info");
     const imagePreviewWrapper = document.getElementById("image-preview-wrapper");
+    const imagePreviewEmpty = document.getElementById("image-preview-empty");
     const imagePreviewImg = document.getElementById("image-preview");
-    const pdfOnlyOptions = document.getElementById("pdf-only-options");
     let lastImageObjectUrl = null;
 
     const ocrPrevBtn = document.getElementById("ocr-prev-btn");
@@ -415,7 +367,7 @@
       if (!file) {
         if (previewWrapper) previewWrapper.classList.add("hidden");
         if (imagePreviewWrapper) imagePreviewWrapper.classList.add("hidden");
-        if (pdfOnlyOptions) pdfOnlyOptions.classList.remove("hidden");
+        if (imagePreviewEmpty) imagePreviewEmpty.classList.remove("hidden");
         if (lastImageObjectUrl) {
           URL.revokeObjectURL(lastImageObjectUrl);
           lastImageObjectUrl = null;
@@ -438,12 +390,12 @@
         lastImageObjectUrl = URL.createObjectURL(file);
         if (imagePreviewImg) imagePreviewImg.src = lastImageObjectUrl;
         if (imagePreviewWrapper) imagePreviewWrapper.classList.remove("hidden");
-        if (pdfOnlyOptions) pdfOnlyOptions.classList.add("hidden");
+        if (imagePreviewEmpty) imagePreviewEmpty.classList.add("hidden");
         return;
       }
 
-      if (pdfOnlyOptions) pdfOnlyOptions.classList.remove("hidden");
       if (imagePreviewWrapper) imagePreviewWrapper.classList.add("hidden");
+      if (imagePreviewEmpty) imagePreviewEmpty.classList.remove("hidden");
       if (lastImageObjectUrl) {
         URL.revokeObjectURL(lastImageObjectUrl);
         lastImageObjectUrl = null;
@@ -460,8 +412,7 @@
       try {
         setPreviewStatus("กำลังสร้างตัวอย่างหน้าแรก...", true);
         const fileData = await file.arrayBuffer();
-        const password = pdfPasswordInput && pdfPasswordInput.value ? pdfPasswordInput.value : undefined;
-        previewPdf = await pdfjsLib.getDocument({ data: fileData, password }).promise;
+        previewPdf = await pdfjsLib.getDocument({ data: fileData }).promise;
         totalPreviewPages = previewPdf.numPages || 1;
         currentPreviewPage = 1;
         await renderPdfPage(currentPreviewPage);
@@ -474,20 +425,8 @@
         totalPreviewPages = 1;
         currentPreviewPage = 1;
         updatePreviewControls();
-        const isPasswordIssue =
-          error && (error.name === "PasswordException" || String(error.message || "").toLowerCase().includes("password"));
-        if (isPasswordIssue) {
-          const hasPassword = pdfPasswordInput && pdfPasswordInput.value;
-          setPreviewStatus(
-            hasPassword
-              ? "รหัสผ่านไม่ถูกต้อง ยังไม่สามารถแสดงตัวอย่างได้"
-              : "ไฟล์นี้มีรหัสผ่าน กรุณาใส่รหัสผ่านเพื่อแสดงตัวอย่าง",
-            true
-          );
-        } else {
-          setPreviewStatus("ไม่สามารถแสดงตัวอย่าง PDF ได้", true);
-          console.error("Preview error:", error);
-        }
+        setPreviewStatus("ไม่สามารถแสดงตัวอย่าง PDF ได้", true);
+        console.error("Preview error:", error);
       }
     }
 
@@ -581,13 +520,6 @@
       renderPdfPreview(file);
     });
 
-    pdfPasswordInput.addEventListener("input", () => {
-      const file = fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : null;
-      if (!file) return;
-      if (previewTimer) clearTimeout(previewTimer);
-      previewTimer = setTimeout(() => renderPdfPreview(file), 300);
-    });
-
     ["dragenter", "dragover"].forEach((eventName) => {
       dropzone.addEventListener(eventName, (event) => {
         event.preventDefault();
@@ -611,6 +543,195 @@
       updateSelectedFileName(files[0]);
       renderPdfPreview(files[0]);
     });
+
+    const imagePreviewClick = document.getElementById("image-preview-click");
+    const imageLightbox = document.getElementById("image-lightbox");
+    const imageLightboxImg = document.getElementById("image-lightbox-img");
+    const imageLightboxClose = document.getElementById("image-lightbox-close");
+    const imageLightboxScroll = document.getElementById("image-lightbox-scroll");
+    const imageLightboxWrap = document.getElementById("image-lightbox-wrap");
+    const imageLightboxZoomIn = document.getElementById("image-lightbox-zoom-in");
+    const imageLightboxZoomOut = document.getElementById("image-lightbox-zoom-out");
+    const imageLightboxZoomReset = document.getElementById("image-lightbox-zoom-reset");
+    const imageLightboxZoomLabel = document.getElementById("image-lightbox-zoom-label");
+
+    let imageLightboxScale = 1;       // scale ที่ใช้วาดจริง
+    let imageLightboxBaseScale = 1;   // scale ตอนเปิดครั้งแรก (fit) ใช้เป็นฐาน 100%
+    const ZOOM_STEP = 1.25;
+    const MIN_ZOOM = 0.25;
+    const MAX_ZOOM = 4;
+
+    function getLightboxFitScale() {
+      if (!imageLightboxScroll || !imageLightboxImg) return 1;
+      const nw = imageLightboxImg.naturalWidth;
+      const nh = imageLightboxImg.naturalHeight;
+      if (!nw || !nh) return 1;
+      const w = imageLightboxScroll.clientWidth - 32;
+      const h = imageLightboxScroll.clientHeight - 32;
+      if (w <= 0 || h <= 0) return 1;
+      const scaleByW = w / nw;
+      const scaleByH = h / nh;
+      return Math.min(1, scaleByW, scaleByH);
+    }
+
+    function setLightboxZoom(scale) {
+      imageLightboxScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale));
+      if (!imageLightboxWrap || !imageLightboxImg) return;
+      const nw = imageLightboxImg.naturalWidth;
+      const nh = imageLightboxImg.naturalHeight;
+      if (nw && nh) {
+        imageLightboxWrap.style.width = (nw * imageLightboxScale) + "px";
+        imageLightboxWrap.style.height = (nh * imageLightboxScale) + "px";
+      }
+      imageLightboxImg.style.transform = `scale(${imageLightboxScale})`;
+      imageLightboxImg.style.width = (imageLightboxImg.naturalWidth || 0) + "px";
+      imageLightboxImg.style.height = (imageLightboxImg.naturalHeight || 0) + "px";
+      if (imageLightboxZoomLabel) {
+        const logicalZoom = imageLightboxScale / (imageLightboxBaseScale || 1);
+        imageLightboxZoomLabel.textContent = Math.round(logicalZoom * 100) + "%";
+      }
+      if (imageLightboxScroll && imageLightboxWrap) {
+        requestAnimationFrame(() => {
+          const el = imageLightboxScroll;
+          const wrapW = imageLightboxWrap.offsetWidth;
+          const wrapH = imageLightboxWrap.offsetHeight;
+          const overflowX = wrapW > el.clientWidth;
+          const overflowY = wrapH > el.clientHeight;
+          const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+          const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+
+          // ใช้ content-overflow เฉพาะกรณีล้นแนวนอนเท่านั้น
+          // ถ้าล้นเฉพาะแนวตั้ง ให้ให้ flex จัดกึ่งกลางแนวนอนให้เอง (ไม่ชิดซ้าย)
+          if (overflowX) {
+            imageLightboxScroll.classList.add("content-overflow");
+          } else {
+            imageLightboxScroll.classList.remove("content-overflow");
+          }
+
+          // แนวนอน: ถ้าล้น ให้เริ่มที่กึ่งกลาง, ถ้าไม่ล้น ให้ชิดซ้าย (แล้ว flex จะจัดกึ่งกลางแนวนอน)
+          el.scrollLeft = overflowX ? maxScrollLeft / 2 : 0;
+          // แนวตั้ง: ถ้าล้น ให้เริ่มที่ด้านบนสุดเสมอ เพื่อไม่ให้หัวเอกสารถูกตัด
+          el.scrollTop = overflowY ? 0 : 0;
+        });
+      }
+    }
+
+    if (imagePreviewClick && imagePreviewImg && imageLightbox && imageLightboxImg) {
+      imagePreviewClick.addEventListener("click", () => {
+        if (!imagePreviewImg.src) return;
+        imageLightboxImg.src = imagePreviewImg.src;
+        imageLightboxImg.style.transform = "";
+        imageLightboxImg.style.width = "";
+        imageLightboxImg.style.height = "";
+        if (imageLightboxWrap) {
+          imageLightboxWrap.style.width = "";
+          imageLightboxWrap.style.height = "";
+        }
+        imageLightbox.classList.remove("hidden");
+        imageLightbox.classList.add("flex");
+        document.body.style.overflow = "hidden";
+        imageLightboxImg.onload = () => {
+          requestAnimationFrame(() => {
+            imageLightboxBaseScale = getLightboxFitScale();
+            setLightboxZoom(imageLightboxBaseScale);
+          });
+        };
+        if (imageLightboxImg.complete && imageLightboxImg.naturalWidth) {
+          requestAnimationFrame(() => {
+            imageLightboxBaseScale = getLightboxFitScale();
+            setLightboxZoom(imageLightboxBaseScale);
+          });
+        }
+      });
+    }
+    function closeImageLightbox() {
+      if (imageLightbox) {
+        imageLightbox.classList.add("hidden");
+        imageLightbox.classList.remove("flex");
+        document.body.style.overflow = "";
+      }
+    }
+    if (imageLightboxClose) imageLightboxClose.addEventListener("click", closeImageLightbox);
+    // ปิดเมื่อคลิกพื้นหลังมืด หรือกด ESC
+    if (imageLightbox) {
+      imageLightbox.addEventListener("click", (e) => {
+        if (e.target === imageLightbox) closeImageLightbox();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && imageLightbox && !imageLightbox.classList.contains("hidden")) closeImageLightbox();
+      });
+    }
+    // ซูมด้วยปุ่มบนแถบเครื่องมือ
+    if (imageLightboxZoomIn) imageLightboxZoomIn.addEventListener("click", () => setLightboxZoom(imageLightboxScale * ZOOM_STEP));
+    if (imageLightboxZoomOut) imageLightboxZoomOut.addEventListener("click", () => setLightboxZoom(imageLightboxScale / ZOOM_STEP));
+    if (imageLightboxZoomReset) imageLightboxZoomReset.addEventListener("click", () => setLightboxZoom(1));
+
+    // คลิกที่รูปเพื่อ toggle ระหว่าง ขนาดพอดีหน้าจอ กับ 100% (คล้าย Discord)
+    if (imageLightboxImg) {
+      imageLightboxImg.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (!imageLightboxScroll) return;
+        const prevScale = imageLightboxScale;
+        const fit = imageLightboxBaseScale || getLightboxFitScale() || 1;
+        const epsilon = 0.01;
+        const targetScale = prevScale <= fit + epsilon ? 1 : fit;
+
+        // คำนวณให้จุดที่คลิกยังอยู่ใกล้ๆ ตำแหน่งเดิมหลังซูม (approximate)
+        const rect = imageLightboxImg.getBoundingClientRect();
+        const clickX = event.clientX - rect.left;
+        const clickY = event.clientY - rect.top;
+        const relX = clickX / (rect.width || 1);
+        const relY = clickY / (rect.height || 1);
+
+        setLightboxZoom(targetScale);
+
+        requestAnimationFrame(() => {
+          const el = imageLightboxScroll;
+          const newRect = imageLightboxImg.getBoundingClientRect();
+          const newX = newRect.left + newRect.width * relX;
+          const newY = newRect.top + newRect.height * relY;
+          const dx = event.clientX - newX;
+          const dy = event.clientY - newY;
+          el.scrollLeft -= dx;
+          el.scrollTop -= dy;
+        });
+      });
+    }
+
+    // ลากเพื่อเลื่อนภาพเมื่อซูมเกิน (drag-to-pan)
+    if (imageLightboxScroll) {
+      let isDragging = false;
+      let dragStartX = 0;
+      let dragStartY = 0;
+      let dragScrollLeft = 0;
+      let dragScrollTop = 0;
+
+      imageLightboxScroll.addEventListener("mousedown", (event) => {
+        if (event.button !== 0) return;
+        if (!imageLightboxScroll.classList.contains("content-overflow")) return;
+        isDragging = true;
+        dragStartX = event.clientX;
+        dragStartY = event.clientY;
+        dragScrollLeft = imageLightboxScroll.scrollLeft;
+        dragScrollTop = imageLightboxScroll.scrollTop;
+        imageLightboxScroll.classList.add("cursor-grabbing");
+        event.preventDefault();
+      });
+
+      window.addEventListener("mousemove", (event) => {
+        if (!isDragging) return;
+        const dx = event.clientX - dragStartX;
+        const dy = event.clientY - dragStartY;
+        imageLightboxScroll.scrollLeft = dragScrollLeft - dx;
+        imageLightboxScroll.scrollTop = dragScrollTop - dy;
+      });
+
+      window.addEventListener("mouseup", () => {
+        if (!isDragging) return;
+        isDragging = false;
+        imageLightboxScroll.classList.remove("cursor-grabbing");
+      });
+    }
 
     if (previewPrevBtn) {
       previewPrevBtn.addEventListener("click", async () => {
@@ -789,10 +910,13 @@
             throw new Error(data.error || "อัพโหลดฐานข้อมูลไม่สำเร็จ");
           }
           const info = data.upload_info || {};
-          const msg = info.header_table && info.detail_table && info.total_table
-            ? `อัพโหลดสำเร็จ: ${info.db_name || ""} → ${info.header_table}, ${info.detail_table}, ${info.total_table} (${info.rows || 0} แถว)`
-            : `อัพโหลดสำเร็จ: ${info.db_name || "ExcelTtbDB"} / ${info.table_name || "-"} / ${info.rows || 0} แถว`;
-          setDbUploadMessage(msg);
+          const parts = [`อัพโหลดสำเร็จ: ${info.db_name || ""} → ${info.header_table || ""}, ${info.detail_table || ""}, ${info.total_table || ""}`];
+          if (info.header_rows != null && info.detail_rows != null && info.total_rows != null) {
+            parts.push(`(header ${info.header_rows} แถว, detail ${info.detail_rows} แถว, total ${info.total_rows} แถว)`);
+          } else {
+            parts.push(`(${info.rows || 0} แถว)`);
+          }
+          setDbUploadMessage(parts.join(" "));
         } catch (error) {
           setDbUploadMessage(error.message || "อัพโหลดฐานข้อมูลไม่สำเร็จ", true);
         } finally {

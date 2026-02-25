@@ -24,12 +24,14 @@ from openpyxl.utils import get_column_letter
 from pypdf import PdfReader, PdfWriter
 
 load_dotenv()
-
+DEFAULT_TYPHOON_API_KEY = os.getenv("TYPHOON_API_KEY", "").strip() or ""
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # 30 MB
 
 TYPHOON_OCR_URL = "https://api.opentyphoon.ai/v1/ocr"
+# เวลารอสูงสุด (วินาที) ต่อการเรียก OCR หนึ่งครั้ง — ถ้า API ช้าให้เพิ่มค่า (ค่าเริ่มต้น 600 = 10 นาที)
+TYPHOON_OCR_TIMEOUT = int(os.environ.get("TYPHOON_OCR_TIMEOUT", "600"))
 OCR_JOBS: dict[str, dict[str, Any]] = {}
 OCR_JOBS_LOCK = threading.Lock()
 OCR_RESULTS: dict[str, dict[str, Any]] = {}
@@ -942,13 +944,14 @@ def parse_preview_sheets_to_structured(sheets_payload: dict[str, Any]) -> dict[s
         net_val = cell(rows[table2_start + 3], 1)
 
     # header จากแถว วันที่, เลขที่, พนักงานขาย, กำหนดชำระเงิน, ครบกำหนดวันที่ (สแกนทั้ง sheet)
+    # รองรับ "เลขที" (สะกดผิดจาก OCR/Excel) ด้วย
     date_val = inv_val = sales_val = pay_val = due_val = ""
     for j in range(len(rows)):
         c0 = cell(rows[j], 0)
         c1 = cell(rows[j], 1)
-        if "วันที่" in c0:
+        if "วันที่" in c0 and "ครบกำหนด" not in c0:
             date_val = c1
-        elif "เลขที่" in c0 and len(c1) > 1:
+        elif ("เลขที่" in c0 or "เลขที" in c0) and len(c1) > 1:
             inv_val = c1
         elif "พนักงานขาย" in c0:
             sales_val = c1
@@ -1031,50 +1034,87 @@ def upload_result_to_sql_server(
     conn = pyodbc.connect(target_conn_str)
     cur = conn.cursor()
 
-    # 1. ตาราง header: วันที่, เลขที่, พนักงานขาย, กำหนดชำระเงิน, ครบกำหนดวันที่
+    doc_no = (header.get("เลขที่", "") or "").strip()
+
+    # 1. ตาราง header: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT
+    #    - เพิ่มคอลัมน์ \"สาขา\" (ค่าเริ่มต้นเว้นว่าง/NULL)
+    #    - คอลัมน์ \"automate\" = \"กำลังรอคิวAUTOMATE\" เสมอ
     t_header = f"{safe_base}_header"
-    cur.execute(f"IF OBJECT_ID('dbo.[{t_header}]', 'U') IS NOT NULL DROP TABLE dbo.[{t_header}];")
-    cols_h = ["วันที่", "เลขที่", "พนักงานขาย", "กำหนดชำระเงิน", "ครบกำหนดวันที่"]
+    cols_h = ["วันที่", "เลขที่", "พนักงานขาย", "กำหนดชำระเงิน", "ครบกำหนดวันที่", "สาขา", "automate"]
     col_defs_h = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_h])
-    cur.execute(f"CREATE TABLE dbo.[{t_header}] ({col_defs_h});")
+    # สร้างตารางถ้ายังไม่มี และถ้ามีอยู่แล้วให้แน่ใจว่ามีคอลัมน์ \"สาขา\" และ \"automate\"
     cur.execute(
-        f"INSERT INTO dbo.[{t_header}] ({', '.join(_sql_quote(c) for c in cols_h)}) VALUES (?, ?, ?, ?, ?);",
-        [header.get("วันที่", ""), header.get("เลขที่", ""), header.get("พนักงานขาย", ""), header.get("กำหนดชำระเงิน", ""), header.get("ครบกำหนดวันที่", "")],
+        f"""
+IF OBJECT_ID('dbo.[{t_header}]', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.[{t_header}] ({col_defs_h});
+END
+ELSE
+BEGIN
+    IF COL_LENGTH('dbo.[{t_header}]', N'สาขา') IS NULL
+        ALTER TABLE dbo.[{t_header}] ADD [สาขา] NVARCHAR(MAX) NULL;
+    IF COL_LENGTH('dbo.[{t_header}]', 'automate') IS NULL
+        ALTER TABLE dbo.[{t_header}] ADD [automate] NVARCHAR(MAX) NULL;
+END
+"""
+    )
+    if doc_no:
+        cur.execute(f"DELETE FROM dbo.[{t_header}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no,))
+    cur.execute(
+        f"INSERT INTO dbo.[{t_header}] ({', '.join(_sql_quote(c) for c in cols_h)}) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        [
+            header.get("วันที่", ""),
+            header.get("เลขที่", ""),
+            header.get("พนักงานขาย", ""),
+            header.get("กำหนดชำระเงิน", ""),
+            header.get("ครบกำหนดวันที่", ""),
+            "",  # สาขา (ค่าเริ่มต้นเว้นว่าง)
+            "กำลังรอคิวAUTOMATE",
+        ],
     )
 
-    # 2. ตาราง detail: เลขที่, รหัสสินค้า, รายละเอียด, จำนวน, หน่วยละ, ส่วนลด, จำนวนเงิน
+    # 2. ตาราง detail: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT
     t_detail = f"{safe_base}_detail"
-    cur.execute(f"IF OBJECT_ID('dbo.[{t_detail}]', 'U') IS NOT NULL DROP TABLE dbo.[{t_detail}];")
     cols_d = ["เลขที่", "รหัสสินค้า", "รายละเอียด", "จำนวน", "หน่วยละ", "ส่วนลด", "จำนวนเงิน"]
     col_defs_d = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_d])
-    cur.execute(f"CREATE TABLE dbo.[{t_detail}] ({col_defs_d});")
+    cur.execute(f"IF OBJECT_ID('dbo.[{t_detail}]', 'U') IS NULL CREATE TABLE dbo.[{t_detail}] ({col_defs_d});")
+    if doc_no:
+        cur.execute(f"DELETE FROM dbo.[{t_detail}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no,))
     if detail:
         insert_d = f"INSERT INTO dbo.[{t_detail}] ({', '.join(_sql_quote(c) for c in cols_d)}) VALUES (?, ?, ?, ?, ?, ?, ?);"
         cur.fast_executemany = True
         cur.executemany(insert_d, [[str(v) if v is not None else "" for v in row] for row in detail])
 
-    # 3. ตาราง total: เลขที่, รวมเงิน, ภาษีมูลค่าเพิ่ม, รวมสุทธิ
+    # 3. ตาราง total: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT
     t_total = f"{safe_base}_total"
-    cur.execute(f"IF OBJECT_ID('dbo.[{t_total}]', 'U') IS NOT NULL DROP TABLE dbo.[{t_total}];")
     cols_t = ["เลขที่", "รวมเงิน", "ภาษีมูลค่าเพิ่ม", "รวมสุทธิ"]
     col_defs_t = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_t])
-    cur.execute(f"CREATE TABLE dbo.[{t_total}] ({col_defs_t});")
+    cur.execute(f"IF OBJECT_ID('dbo.[{t_total}]', 'U') IS NULL CREATE TABLE dbo.[{t_total}] ({col_defs_t});")
+    if doc_no:
+        cur.execute(f"DELETE FROM dbo.[{t_total}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no,))
     cur.execute(
         f"INSERT INTO dbo.[{t_total}] ({', '.join(_sql_quote(c) for c in cols_t)}) VALUES (?, ?, ?, ?);",
         [total.get("เลขที่", ""), total.get("รวมเงิน", ""), total.get("ภาษีมูลค่าเพิ่ม", ""), total.get("รวมสุทธิ", "")],
     )
 
     conn.commit()
+    cur.execute(f"SELECT COUNT(*) FROM dbo.[{t_header}];")
+    header_rows = cur.fetchone()[0]
     cur.execute(f"SELECT COUNT(*) FROM dbo.[{t_detail}];")
     detail_rows = cur.fetchone()[0]
+    cur.execute(f"SELECT COUNT(*) FROM dbo.[{t_total}];")
+    total_rows = cur.fetchone()[0]
     conn.close()
     return {
         "db_name": safe_db,
         "table_name": f"dbo.{safe_base} (header, detail, total)",
-        "rows": 1 + int(detail_rows) + 1,
+        "rows": int(header_rows) + int(detail_rows) + int(total_rows),
         "header_table": f"dbo.{t_header}",
         "detail_table": f"dbo.{t_detail}",
         "total_table": f"dbo.{t_total}",
+        "header_rows": int(header_rows),
+        "detail_rows": int(detail_rows),
+        "total_rows": int(total_rows),
     }
 
 
@@ -1405,17 +1445,46 @@ def call_typhoon_ocr_single_request(
 
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    with open(file_path, "rb") as file:
-        response = requests.post(
-            TYPHOON_OCR_URL,
-            files={"file": file},
-            data=data,
-            headers=headers,
-            timeout=180,
-        )
+    last_error: Optional[Exception] = None
+    max_retries = 3  # ลองซ้ำเมื่อ API คืน 5xx
+    for attempt in range(max_retries):
+        try:
+            with open(file_path, "rb") as file:
+                response = requests.post(
+                    TYPHOON_OCR_URL,
+                    files={"file": file},
+                    data=data,
+                    headers=headers,
+                    timeout=TYPHOON_OCR_TIMEOUT,
+                )
+            if response.status_code == 200:
+                last_error = None
+                break
+            if 500 <= response.status_code < 600 and attempt < max_retries - 1:
+                time.sleep(3 * (attempt + 1))  # 3s, 6s ก่อนลองใหม่
+                last_error = RuntimeError(f"Typhoon API error {response.status_code}: {response.text}")
+                continue
+            last_error = RuntimeError(f"Typhoon API error {response.status_code}: {response.text}")
+            break
+        except requests.exceptions.Timeout as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise
 
-    if response.status_code != 200:
-        raise RuntimeError(f"Typhoon API error {response.status_code}: {response.text}")
+    if last_error is not None:
+        if "500" in str(last_error) or "Internal Server Error" in str(last_error):
+            raise RuntimeError(
+                "เซิร์ฟเวอร์ Typhoon ขัดข้อง (500) กรุณาลองใหม่อีกครั้งในภายหลัง หรือตรวจสอบสถานะ API"
+            ) from last_error
+        raise last_error
 
     result = response.json()
     extracted_texts = []
@@ -1976,9 +2045,9 @@ def ocr_start():
     if not uploaded_file or uploaded_file.filename == "":
         return jsonify({"ok": False, "error": "กรุณาเลือกไฟล์ PDF หรือรูปสแกนก่อน"}), 400
 
-    api_key = request.form.get("api_key", "").strip() or os.getenv("TYPHOON_API_KEY", "")
+    api_key = DEFAULT_TYPHOON_API_KEY
     if not api_key:
-        return jsonify({"ok": False, "error": "กรุณาใส่ Typhoon API Key"}), 400
+        return jsonify({"ok": False, "error": "ระบบยังไม่ได้ตั้งค่า Typhoon API Key ในฝั่งเซิร์ฟเวอร์ (.env)"}), 500
 
     params = {
         "uploaded_bytes": uploaded_file.read(),
@@ -2127,7 +2196,7 @@ def index():
     if request.method == "POST":
         uploaded_file = request.files.get("pdf_file")
         pdf_password = request.form.get("pdf_password", "").strip()
-        api_key = request.form.get("api_key", "").strip() or os.getenv("TYPHOON_API_KEY", "")
+        api_key = DEFAULT_TYPHOON_API_KEY
 
         model = request.form.get("model", defaults["model"]).strip()
         task_type = request.form.get("task_type", defaults["task_type"]).strip()
@@ -2142,7 +2211,7 @@ def index():
         if not uploaded_file or uploaded_file.filename == "":
             error = "กรุณาเลือกไฟล์ PDF หรือรูปสแกนก่อน"
         elif not api_key:
-            error = "กรุณาใส่ Typhoon API Key"
+            error = "ระบบยังไม่ได้ตั้งค่า Typhoon API Key ในฝั่งเซิร์ฟเวอร์ (.env)"
         else:
             try:
                 result = run_ocr_pipeline(

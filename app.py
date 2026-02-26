@@ -1040,9 +1040,9 @@ def upload_result_to_sql_server(
     #    - เพิ่มคอลัมน์ \"สาขา\" (ค่าเริ่มต้นเว้นว่าง/NULL)
     #    - คอลัมน์ \"automate\" = \"กำลังรอคิวAUTOMATE\" เสมอ
     t_header = f"{safe_base}_header"
-    cols_h = ["วันที่", "เลขที่", "พนักงานขาย", "กำหนดชำระเงิน", "ครบกำหนดวันที่", "สาขา", "automate"]
+    cols_h = ["วันที่", "เลขที่", "พนักงานขาย", "กำหนดชำระเงิน", "ครบกำหนดวันที่", "สาขา", "automate", "แบรนด์"]
     col_defs_h = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_h])
-    # สร้างตารางถ้ายังไม่มี และถ้ามีอยู่แล้วให้แน่ใจว่ามีคอลัมน์ \"สาขา\" และ \"automate\"
+    # สร้างตารางถ้ายังไม่มี และถ้ามีอยู่แล้วให้แน่ใจว่ามีคอลัมน์ "สาขา", "automate" และ "แบรนด์"
     cur.execute(
         f"""
 IF OBJECT_ID('dbo.[{t_header}]', 'U') IS NULL
@@ -1055,13 +1055,15 @@ BEGIN
         ALTER TABLE dbo.[{t_header}] ADD [สาขา] NVARCHAR(MAX) NULL;
     IF COL_LENGTH('dbo.[{t_header}]', 'automate') IS NULL
         ALTER TABLE dbo.[{t_header}] ADD [automate] NVARCHAR(MAX) NULL;
+    IF COL_LENGTH('dbo.[{t_header}]', 'แบรนด์') IS NULL
+        ALTER TABLE dbo.[{t_header}] ADD [แบรนด์] NVARCHAR(MAX) NULL;
 END
 """
     )
     if doc_no:
         cur.execute(f"DELETE FROM dbo.[{t_header}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no,))
     cur.execute(
-        f"INSERT INTO dbo.[{t_header}] ({', '.join(_sql_quote(c) for c in cols_h)}) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        f"INSERT INTO dbo.[{t_header}] ({', '.join(_sql_quote(c) for c in cols_h)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
         [
             header.get("วันที่", ""),
             header.get("เลขที่", ""),
@@ -1070,6 +1072,7 @@ END
             header.get("ครบกำหนดวันที่", ""),
             "",  # สาขา (ค่าเริ่มต้นเว้นว่าง)
             "กำลังรอคิวAUTOMATE",
+            None,  # แบรนด์
         ],
     )
 

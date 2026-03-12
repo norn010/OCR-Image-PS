@@ -7,6 +7,7 @@ const API_BASE = "";
 import type { OcrStatus, ExcelSheet } from "./types";
 import { UploadPanel } from "./components/UploadPanel";
 import { ImagePreviewPanel } from "./components/ImagePreviewPanel";
+import { PdfPreviewPanel } from "./components/PdfPreviewPanel";
 import { OcrResultPanel } from "./components/OcrResultPanel";
 import { Lightbox } from "./components/Lightbox";
 
@@ -14,6 +15,8 @@ const App: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFileName, setSelectedFileName] = useState<string>("ยังไม่ได้เลือกไฟล์");
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
+  const [isPdfFile, setIsPdfFile] = useState<boolean>(false);
 
   const [jobId, setJobId] = useState<string>("");
   const [status, setStatus] = useState<OcrStatus | null>(null);
@@ -56,16 +59,30 @@ const App: React.FC = () => {
       setSelectedFile(null);
       setSelectedFileName("ยังไม่ได้เลือกไฟล์");
       setImagePreviewUrl(null);
+      setPdfPreviewUrl(null);
+      setIsPdfFile(false);
       return;
     }
     setSelectedFile(file);
     setSelectedFileName(file.name);
+    
     const isImage = file.type.startsWith("image/") || /\.(png|jpe?g)$/i.test(file.name);
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    
     if (isImage) {
       const url = URL.createObjectURL(file);
       setImagePreviewUrl(url);
+      setPdfPreviewUrl(null);
+      setIsPdfFile(false);
+    } else if (isPdf) {
+      const url = URL.createObjectURL(file);
+      setPdfPreviewUrl(url);
+      setImagePreviewUrl(null);
+      setIsPdfFile(true);
     } else {
       setImagePreviewUrl(null);
+      setPdfPreviewUrl(null);
+      setIsPdfFile(false);
     }
   }
 
@@ -122,10 +139,21 @@ const App: React.FC = () => {
           if (cancelled) break;
           setStatus(data);
           setPageTimings(data.page_timings || []);
+          
+          // แสดงผลลัพธ์แบบ real-time เมื่อมี result_id (แม้ยังประมวลผลไม่เสร็จทุกหน้า)
+          if (data.result_id) {
+            setResultId(data.result_id);
+          }
+          
           if (data.status === "completed" || data.status === "error") {
             if (data.status === "completed" && data.result && data.result_id) {
               setResultId(data.result_id);
-              setExtractedHtml(data.result.extracted_html || "");
+              // ใช้ข้อมูลจาก page_results แทน extracted_html แบบเดิม
+              if (data.result.page_results && data.result.page_results.length > 0) {
+                setExtractedHtml(""); // ล้างข้อมูลเก่า
+              } else {
+                setExtractedHtml(data.result.extracted_html || "");
+              }
             }
             break;
           }
@@ -495,12 +523,20 @@ const App: React.FC = () => {
             pageTimings={pageTimings}
           />
 
-          {/* Image preview panel */}
-          <ImagePreviewPanel
-            imagePreviewUrl={imagePreviewUrl}
-            selectedFileName={selectedFileName}
-            openLightbox={openLightbox}
-          />
+          {/* Preview panel - แสดง PDF หรือ Image ตามประเภทไฟล์ */}
+          {isPdfFile ? (
+            <PdfPreviewPanel
+              pdfPreviewUrl={pdfPreviewUrl}
+              selectedFileName={selectedFileName}
+              openLightbox={openLightbox}
+            />
+          ) : (
+            <ImagePreviewPanel
+              imagePreviewUrl={imagePreviewUrl}
+              selectedFileName={selectedFileName}
+              openLightbox={openLightbox}
+            />
+          )}
         </div>
 
         {/* OCR result + Excel/DB controls */}
@@ -523,6 +559,13 @@ const App: React.FC = () => {
           isExcelLoading={isExcelLoading}
           excelPreviewRef={excelPreviewRef}
           excelSheets={excelSheets}
+          pageTimings={pageTimings}
+          elapsedSeconds={elapsedSeconds}
+          // PDF Preview props
+          pdfPreviewUrl={pdfPreviewUrl}
+          isPdfFile={isPdfFile}
+          // OCR status for real-time updates
+          ocrStatus={status?.status}
         />
       </div>
 

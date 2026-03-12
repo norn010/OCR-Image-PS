@@ -54,6 +54,55 @@ body {
   margin: 8px 0;
 }
 
+/* OCR HTML Content Styling */
+.ocr-html-content {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.ocr-html-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 10px 0;
+  background: white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.ocr-html-content th, .ocr-html-content td {
+  border: 1px solid #e2e8f0;
+  padding: 12px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ocr-html-content th {
+  background-color: #f8fafc;
+  font-weight: 600;
+  color: #1e293b;
+  border-bottom: 2px solid #cbd5e1;
+}
+
+.ocr-html-content h1, .ocr-html-content h2, .ocr-html-content h3, .ocr-html-content h4 {
+  color: #1e293b;
+  margin: 16px 0 8px 0;
+  font-weight: 600;
+}
+
+.ocr-html-content h1 { font-size: 1.5rem; }
+.ocr-html-content h2 { font-size: 1.25rem; }
+.ocr-html-content h3 { font-size: 1.125rem; }
+.ocr-html-content h4 { font-size: 1rem; }
+
+.ocr-html-content p {
+  margin: 8px 0;
+  color: #374151;
+}
+
+.ocr-html-content strong, .ocr-html-content b {
+  color: #1e293b;
+  font-weight: 600;
+}
+
 .image-lightbox-scroll.content-overflow {
   align-items: flex-start;
   justify-content: flex-start;

@@ -15,6 +15,15 @@ export type OcrStatus = {
         page_texts: string[];
         page_timings: { page_number: number; elapsed_seconds: number }[];
         elapsed_seconds: number;
+        page_results?: {
+            page_number: number;
+            header: Record<string, string>;
+            detail: string[][];
+            total: Record<string, string>;
+            extracted_text: string;
+            extracted_html: string;
+            error?: string;
+        }[];
     };
 };
 

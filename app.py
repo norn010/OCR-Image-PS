@@ -672,6 +672,14 @@ def get_ocr_result(result_id: str) -> Optional[dict[str, Any]]:
         return OCR_RESULTS.get(result_id)
 
 
+def set_ocr_result(result_id: str, result: dict[str, Any]) -> None:
+    """อัปเดตผลลัพธ์ OCR ใน memory store"""
+    if not result_id:
+        return
+    with OCR_RESULTS_LOCK:
+        OCR_RESULTS[result_id] = result
+
+
 def sanitize_table_name(table_name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_]", "_", (table_name or "").strip())
     cleaned = cleaned.strip("_")
@@ -1014,13 +1022,37 @@ def upload_result_to_sql_server(
         except (json.JSONDecodeError, KeyError, TypeError):
             edited_sheets_json = None
     if not edited_sheets_json:
-        extracted_html = result.get("extracted_html", "")
-        extracted_text = result.get("extracted_text", "")
-        page_htmls = result.get("page_htmls", []) or []
-        data = extract_ocr_tables_structured(extracted_html, extracted_text or "", page_htmls)
-        header = data["header"]
-        detail = data["detail"]
-        total = data["total"]
+        # ใช้ข้อมูลจาก page_results ที่มีโครงสร้างแล้ว
+        page_results = result.get("page_results", [])
+        if page_results:
+            # รวมข้อมูลจากทุกหน้า
+            all_headers = []
+            all_details = []
+            all_totals = []
+            
+            for page_result in page_results:
+                header = page_result.get("header", {})
+                detail = page_result.get("detail", [])
+                total = page_result.get("total", {})
+                
+                # เพิ่มข้อมูลแต่ละหน้า
+                all_headers.append(header)
+                all_details.extend(detail)  # เพิ่มรายการสินค้าทั้งหมด
+                all_totals.append(total)
+            
+            # ใช้ข้อมูลจากหน้าแรกสำหรับ header (หรืออาจใช้หลายหน้าก็ได้)
+            header = all_headers[0] if all_headers else {}
+            detail = all_details
+            total = all_totals[0] if all_totals else {}
+        else:
+            # Fallback: ใช้วิธีเก่าถ้าไม่มี page_results
+            extracted_html = result.get("extracted_html", "")
+            extracted_text = result.get("extracted_text", "")
+            page_htmls = result.get("page_htmls", []) or []
+            data = extract_ocr_tables_structured(extracted_html, extracted_text or "", page_htmls)
+            header = data["header"]
+            detail = data["detail"]
+            total = data["total"]
 
     safe_base = sanitize_table_name(table_name)
     safe_db = sanitize_db_name(db_name)
@@ -1036,9 +1068,9 @@ def upload_result_to_sql_server(
 
     doc_no = (header.get("เลขที่", "") or "").strip()
 
-    # 1. ตาราง header: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT
-    #    - เพิ่มคอลัมน์ \"สาขา\" (ค่าเริ่มต้นเว้นว่าง/NULL)
-    #    - คอลัมน์ \"automate\" = \"กำลังรอคิวAUTOMATE\" เสมอ
+    # 1. ตาราง header: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT จากทุกหน้า
+    #    - เพิ่มคอลัมน์ "สาขา" (ค่าเริ่มต้นเว้นว่าง/NULL)
+    #    - คอลัมน์ "automate" = "กำลังรอคิวAUTOMATE" เสมอ
     t_header = f"{safe_base}_header"
     cols_h = ["วันที่", "เลขที่", "พนักงานขาย", "กำหนดชำระเงิน", "ครบกำหนดวันที่", "สาขา", "automate", "แบรนด์"]
     col_defs_h = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_h])
@@ -1060,21 +1092,29 @@ BEGIN
 END
 """
     )
-    if doc_no:
-        cur.execute(f"DELETE FROM dbo.[{t_header}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no,))
-    cur.execute(
-        f"INSERT INTO dbo.[{t_header}] ({', '.join(_sql_quote(c) for c in cols_h)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
-        [
-            header.get("วันที่", ""),
-            header.get("เลขที่", ""),
-            header.get("พนักงานขาย", ""),
-            header.get("กำหนดชำระเงิน", ""),
-            header.get("ครบกำหนดวันที่", ""),
-            "",  # สาขา (ค่าเริ่มต้นเว้นว่าง)
-            "กำลังรอคิวAUTOMATE",
-            None,  # แบรนด์
-        ],
-    )
+    # ลบข้อมูลเก่าที่มีเลขที่ซ้ำกัน (จากทุกหน้า)
+    all_doc_nos = set()
+    for h in all_headers:
+        doc_no_each = (h.get("เลขที่", "") or "").strip()
+        if doc_no_each:
+            all_doc_nos.add(doc_no_each)
+    for doc_no_each in all_doc_nos:
+        cur.execute(f"DELETE FROM dbo.[{t_header}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no_each,))
+    # INSERT header จากทุกหน้า
+    for h in all_headers:
+        cur.execute(
+            f"INSERT INTO dbo.[{t_header}] ({', '.join(_sql_quote(c) for c in cols_h)}) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            [
+                h.get("วันที่", ""),
+                h.get("เลขที่", ""),
+                h.get("พนักงานขาย", ""),
+                h.get("กำหนดชำระเงิน", ""),
+                h.get("ครบกำหนดวันที่", ""),
+                "",  # สาขา (ค่าเริ่มต้นเว้นว่าง)
+                "กำลังรอคิวAUTOMATE",
+                None,  # แบรนด์
+            ],
+        )
 
     # 2. ตาราง detail: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT
     t_detail = f"{safe_base}_detail"
@@ -1088,17 +1128,20 @@ END
         cur.fast_executemany = True
         cur.executemany(insert_d, [[str(v) if v is not None else "" for v in row] for row in detail])
 
-    # 3. ตาราง total: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT
+    # 3. ตาราง total: สร้างถ้ายังไม่มี, ลบเฉพาะแถวที่ตรงเลขที่นี้ แล้ว INSERT จากทุกหน้า
     t_total = f"{safe_base}_total"
     cols_t = ["เลขที่", "รวมเงิน", "ภาษีมูลค่าเพิ่ม", "รวมสุทธิ"]
     col_defs_t = ", ".join([f"{_sql_quote(c)} NVARCHAR(MAX) NULL" for c in cols_t])
     cur.execute(f"IF OBJECT_ID('dbo.[{t_total}]', 'U') IS NULL CREATE TABLE dbo.[{t_total}] ({col_defs_t});")
-    if doc_no:
-        cur.execute(f"DELETE FROM dbo.[{t_total}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no,))
-    cur.execute(
-        f"INSERT INTO dbo.[{t_total}] ({', '.join(_sql_quote(c) for c in cols_t)}) VALUES (?, ?, ?, ?);",
-        [total.get("เลขที่", ""), total.get("รวมเงิน", ""), total.get("ภาษีมูลค่าเพิ่ม", ""), total.get("รวมสุทธิ", "")],
-    )
+    # ลบข้อมูลเก่าที่มีเลขที่ซ้ำกัน (จากทุกหน้า)
+    for doc_no_each in all_doc_nos:
+        cur.execute(f"DELETE FROM dbo.[{t_total}] WHERE {_sql_quote('เลขที่')} = ?;", (doc_no_each,))
+    # INSERT total จากทุกหน้า
+    for t in all_totals:
+        cur.execute(
+            f"INSERT INTO dbo.[{t_total}] ({', '.join(_sql_quote(c) for c in cols_t)}) VALUES (?, ?, ?, ?);",
+            [t.get("เลขที่", ""), t.get("รวมเงิน", ""), t.get("ภาษีมูลค่าเพิ่ม", ""), t.get("รวมสุทธิ", "")],
+        )
 
     conn.commit()
     cur.execute(f"SELECT COUNT(*) FROM dbo.[{t_header}];")
@@ -1522,6 +1565,7 @@ def call_typhoon_ocr(
     pages: Optional[list[int]] = None,
     progress_callback: Optional[Callable[[int, int, int], None]] = None,
     page_done_callback: Optional[Callable[[int, int, int, float], None]] = None,
+    incremental_result_callback: Optional[Callable[[int, int, int, str, float], None]] = None,
     use_native_extraction: bool = True,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     """
@@ -1552,6 +1596,9 @@ def call_typhoon_ocr(
                 page_timings.append({"page_number": page_number, "elapsed_seconds": elapsed})
                 if page_done_callback:
                     page_done_callback(page_index, total_pages, page_number, elapsed)
+                # ส่งผลลัพธ์แบบ real-time
+                if incremental_result_callback:
+                    incremental_result_callback(page_index, total_pages, page_number, native_text, elapsed)
                 continue
 
             page_payload = json.dumps([page_number])
@@ -1589,6 +1636,10 @@ def call_typhoon_ocr(
             page_timings.append({"page_number": page_number, "elapsed_seconds": elapsed})
             if page_done_callback:
                 page_done_callback(page_index, total_pages, page_number, elapsed)
+            # ส่งผลลัพธ์แบบ real-time (OCR API)
+            if incremental_result_callback:
+                print(f"[DEBUG] Calling incremental_result_callback for page {page_number}")
+                incremental_result_callback(page_index, total_pages, page_number, page_text, elapsed)
 
         return "\n\n".join(merged_texts), per_page_texts, page_timings
 
@@ -1911,6 +1962,7 @@ def run_ocr_pipeline(
     pages_raw: str = "",
     progress_callback: Optional[Callable[[int, int, int], None]] = None,
     page_done_callback: Optional[Callable[[int, int, int, float], None]] = None,
+    incremental_result_callback: Optional[Callable[[int, dict], None]] = None,
 ) -> dict[str, Any]:
     temp_path = ""
     start_time = time.perf_counter()
@@ -1935,6 +1987,46 @@ def run_ocr_pipeline(
                 pages_value = list(range(1, page_count + 1))
             use_native = True
 
+        # สร้าง wrapper callback เพื่อประมวลผลข้อความเป็น structured data แบบ real-time
+        def on_page_extracted(
+            page_index: int, 
+            total_pages: int, 
+            page_number: int, 
+            page_text: str, 
+            elapsed: float
+        ) -> None:
+            """ประมวลผลข้อความหน้าเดียวและส่งผลลัพธ์แบบ real-time"""
+            try:
+                page_html = render_ocr_html(page_text)
+                page_text_corrected = ensure_summary_spacing_in_text(
+                    correct_ocr_description_text(page_text)
+                )
+                page_html_corrected = render_ocr_html(page_text_corrected)
+                page_data = extract_ocr_tables_structured(page_html_corrected, page_text_corrected, [page_html_corrected])
+                page_result = {
+                    "page_number": page_number,
+                    "header": page_data.get("header", {}),
+                    "detail": page_data.get("detail", []),
+                    "total": page_data.get("total", {}),
+                    "extracted_text": page_text_corrected,
+                    "extracted_html": page_html_corrected
+                }
+                if incremental_result_callback:
+                    incremental_result_callback(page_number, page_result)
+            except Exception as e:
+                # ถ้าประมวลผลล้มเหลว ส่งผลลัพธ์แบบ error
+                page_result = {
+                    "page_number": page_number,
+                    "header": {},
+                    "detail": [],
+                    "total": {},
+                    "extracted_text": page_text,
+                    "extracted_html": "",
+                    "error": str(e)
+                }
+                if incremental_result_callback:
+                    incremental_result_callback(page_number, page_result)
+
         extracted_text, page_texts, page_timings = call_typhoon_ocr(
             file_path=temp_path,
             api_key=api_key,
@@ -1947,6 +2039,7 @@ def run_ocr_pipeline(
             pages=pages_value,
             progress_callback=progress_callback,
             page_done_callback=page_done_callback,
+            incremental_result_callback=on_page_extracted,
             use_native_extraction=use_native,
         )
 
@@ -1966,6 +2059,32 @@ def run_ocr_pipeline(
         ).decode("utf-8")
         elapsed_seconds = round(time.perf_counter() - start_time, 2)
 
+        # แยกข้อมูลแต่ละหน้าเพื่อสร้างผลลัพธ์สมบูรณ์ (ไม่ต้องส่ง real-time อีกแล้วเพราะส่งไปแล้วตอน OCR)
+        page_results = []
+        for i, (page_text, page_html) in enumerate(zip(page_texts, page_htmls)):
+            try:
+                page_data = extract_ocr_tables_structured(page_html, page_text, [page_html])
+                page_result = {
+                    "page_number": i + 1,
+                    "header": page_data.get("header", {}),
+                    "detail": page_data.get("detail", []),
+                    "total": page_data.get("total", {}),
+                    "extracted_text": page_text,
+                    "extracted_html": page_html
+                }
+                page_results.append(page_result)
+            except Exception as e:
+                page_result = {
+                    "page_number": i + 1,
+                    "header": {},
+                    "detail": [],
+                    "total": {},
+                    "extracted_text": page_text,
+                    "extracted_html": page_html,
+                    "error": str(e)
+                }
+                page_results.append(page_result)
+
         return {
             "extracted_text": extracted_text,
             "extracted_html": extracted_html,
@@ -1976,6 +2095,7 @@ def run_ocr_pipeline(
             "page_htmls": page_htmls,
             "page_timings": page_timings,
             "elapsed_seconds": elapsed_seconds,
+            "page_results": page_results,  # เพิ่มผลลัพธ์แต่ละหน้า
         }
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -1983,6 +2103,11 @@ def run_ocr_pipeline(
 
 
 def run_ocr_job(job_id: str, params: dict[str, Any]) -> None:
+    # สร้าง result_id ล่วงหน้าเพื่อเก็บผลลัพธ์แบบ real-time
+    partial_result_id = uuid.uuid4().hex
+    partial_page_results: list[dict] = []
+    # ไม่ต้องใช้ local edited_page_numbers เพราะจะอ่านจาก OCR_RESULTS ตอน merge แทน
+    
     try:
         def on_progress(current_step: int, total_steps: int, page_number: int) -> None:
             update_ocr_job(
@@ -2009,6 +2134,70 @@ def run_ocr_job(job_id: str, params: dict[str, Any]) -> None:
                 total_steps=total_steps,
                 current_page_number=page_number,
             )
+        
+        def on_page_result(page_number: int, page_result: dict) -> None:
+            """เก็บผลลัพธ์แต่ละหน้าแบบ real-time"""
+            print(f"[DEBUG] on_page_result called for page {page_number}")
+            
+            # ตรวจสอบว่าหน้านี้ถูกแก้ไขแล้วหรือไม่ (จากการ reload partial result)
+            with OCR_RESULTS_LOCK:
+                existing = OCR_RESULTS.get(partial_result_id, {})
+                existing_edited = existing.get("edited_pages", set())
+                existing_results = existing.get("page_results", [])
+                
+                # ถ้าหน้านี้ถูกแก้ไขแล้ว ให้ใช้ข้อมูลที่แก้ไขแล้วจาก OCR_RESULTS
+                if page_number in existing_edited:
+                    # หาข้อมูลที่แก้ไขแล้วจาก OCR_RESULTS
+                    for pr in existing_results:
+                        if pr.get("page_number") == page_number:
+                            page_result = pr
+                            print(f"[DEBUG] Using edited data for page {page_number} from OCR_RESULTS")
+                            break
+            
+            # อัปเดตหรือเพิ่มผลลัพธ์
+            updated = False
+            for i, pr in enumerate(partial_page_results):
+                if pr.get("page_number") == page_number:
+                    partial_page_results[i] = page_result
+                    updated = True
+                    break
+            if not updated:
+                partial_page_results.append(page_result)
+            
+            # เก็บผลลัพธ์แบบ partial ใน memory - อ่าน edited_pages จาก existing ถ้ามี
+            with OCR_RESULTS_LOCK:
+                existing = OCR_RESULTS.get(partial_result_id, {})
+                existing_edited = existing.get("edited_pages", set())
+                existing_results = existing.get("page_results", [])
+                
+                # อัปเดต partial_page_results ด้วยข้อมูลที่แก้ไขแล้ว
+                for existing_pr in existing_results:
+                    existing_page_num = existing_pr.get("page_number")
+                    if existing_page_num in existing_edited:
+                        for i, pr in enumerate(partial_page_results):
+                            if pr.get("page_number") == existing_page_num:
+                                partial_page_results[i] = existing_pr
+                                print(f"[DEBUG] Updated partial_page_results[{i}] with edited data for page {existing_page_num}")
+                                break
+            
+            partial_result = {
+                "page_results": partial_page_results.copy(),
+                "partial": True,
+                "total_pages": len(partial_page_results),
+                "filename": params.get("filename", ""),
+                "edited_pages": existing_edited if existing_edited else set(),
+            }
+            with OCR_RESULTS_LOCK:
+                OCR_RESULTS[partial_result_id] = partial_result
+            print(f"[DEBUG] Stored partial result {partial_result_id} with {len(partial_page_results)} pages, edited: {existing_edited}")
+            
+            # อัปเดต job ด้วย result_id หลังจากมีหน้าแรกเสร็จ
+            if len(partial_page_results) == 1:
+                print(f"[DEBUG] Updating job {job_id} with result_id {partial_result_id}")
+                update_ocr_job(
+                    job_id,
+                    result_id=partial_result_id,
+                )
 
         result = run_ocr_pipeline(
             uploaded_bytes=params["uploaded_bytes"],
@@ -2024,15 +2213,70 @@ def run_ocr_job(job_id: str, params: dict[str, Any]) -> None:
             pages_raw=params.get("pages_raw", ""),
             progress_callback=on_progress,
             page_done_callback=on_page_done,
+            incremental_result_callback=on_page_result,
         )
-        result_id = store_ocr_result(result)
+        
+        # Merge ข้อมูลที่แก้ไขแล้วจาก partial result เข้ากับผลลัพธ์สมบูรณ์
+        with OCR_RESULTS_LOCK:
+            partial_data = OCR_RESULTS.get(partial_result_id, {})
+            partial_results = partial_data.get("page_results", [])
+            edited_pages = partial_data.get("edited_pages", set())
+            
+            # Handle case where edited_pages might be a list
+            if isinstance(edited_pages, list):
+                edited_pages = set(edited_pages)
+            
+            print(f"[DEBUG] Final merge - edited_pages: {edited_pages} (type: {type(edited_pages)}), partial_results: {len(partial_results)}, final_results: {len(result.get('page_results', []))}")
+            
+            # Debug: Show what pages are in partial_results
+            partial_page_nums = [pr.get("page_number") for pr in partial_results]
+            print(f"[DEBUG] Partial result pages: {partial_page_nums}")
+            
+            if edited_pages and result.get("page_results"):
+                print(f"[DEBUG] Merging {len(edited_pages)} edited pages into final result")
+                final_page_results = result["page_results"]
+                
+                # Debug: Show final result pages
+                final_page_nums = [pr.get("page_number") for pr in final_page_results]
+                print(f"[DEBUG] Final result pages before merge: {final_page_nums}")
+                
+                # สร้าง mapping ของ page_number -> index
+                page_index_map = {pr.get("page_number"): i for i, pr in enumerate(final_page_results)}
+                
+                # แทนที่ข้อมูลหน้าที่ถูกแก้ไขด้วยข้อมูลจาก partial result
+                for pr in partial_results:
+                    page_num = pr.get("page_number")
+                    if page_num in edited_pages and page_num in page_index_map:
+                        idx = page_index_map[page_num]
+                        print(f"[DEBUG] Replacing page {page_num} with edited version")
+                        print(f"[DEBUG] Before: {final_page_results[idx].get('header', {})}")
+                        final_page_results[idx] = pr
+                        print(f"[DEBUG] After: {final_page_results[idx].get('header', {})}")
+                
+                result["page_results"] = final_page_results
+                
+                # Debug: Show final result pages after merge
+                final_page_nums_after = [pr.get("page_number") for pr in final_page_results]
+                print(f"[DEBUG] Final result pages after merge: {final_page_nums_after}")
+            else:
+                print(f"[DEBUG] No merge needed - edited_pages empty: {not edited_pages}, has final results: {bool(result.get('page_results'))}")
+        
+        # เก็บผลลัพธ์สมบูรณ์ - ใช้ partial_result_id เดิมเพื่อรักษา edited data
+        with OCR_RESULTS_LOCK:
+            # ลบ partial flag และเก็บผลลัพธ์สมบูรณ์ด้วย ID เดิม
+            result["partial"] = False
+            OCR_RESULTS[partial_result_id] = result
+            final_result_id = partial_result_id
+            print(f"[DEBUG] Stored final result with same ID: {final_result_id}")
+        
         update_ocr_job(
             job_id,
             status="completed",
             message="OCR เสร็จแล้ว",
             result=result,
-            result_id=result_id,
+            result_id=final_result_id,
         )
+        # ไม่ต้องลบ partial result เพราะใช้ ID เดียวกัน
     except Exception as exc:
         update_ocr_job(
             job_id,
@@ -2119,6 +2363,182 @@ def check_doc_no_exists_in_db(doc_no: str, table_base: str, db_name: str) -> boo
         return row is not None
     except pyodbc.Error:
         return False
+
+
+@app.route("/api/list-documents", methods=["GET"])
+def list_documents():
+    """ดึงข้อมูลสรุปเอกสารสำหรับมุมมองรายการ"""
+    result_id = request.args.get("result_id", "").strip()
+    if not result_id:
+        return jsonify({"ok": False, "error": "ไม่พบ result_id"}), 400
+
+    result = get_ocr_result(result_id)
+    if not result:
+        return jsonify({"ok": False, "error": "ผลลัพธ์หมดอายุหรือไม่พบ"}), 404
+
+    try:
+        page_results = result.get("page_results", [])
+        documents = []
+        
+        # ถ้ามี page_results ใหม่ ใช้ข้อมูลนั้น
+        if page_results:
+            for page_result in page_results:
+                header = page_result.get("header", {})
+                doc = {
+                    "page_number": page_result.get("page_number", 0),
+                    "วันที่": header.get("วันที่", ""),
+                    "เลขที่": header.get("เลขที่", ""),
+                    "พนักงานขาย": header.get("พนักงานขาย", ""),
+                    "กำหนดชำระเงิน": header.get("กำหนดชำระเงิน", ""),
+                    "ครบกำหนดวันที่": header.get("ครบกำหนดวันที่", ""),
+                    "รวมเงิน": page_result.get("total", {}).get("รวมเงิน", ""),
+                    "ภาษีมูลค่าเพิ่ม": page_result.get("total", {}).get("ภาษีมูลค่าเพิ่ม", ""),
+                    "รวมสุทธิ": page_result.get("total", {}).get("รวมสุทธิ", ""),
+                    "has_error": "error" in page_result,
+                    "error": page_result.get("error", "")
+                }
+                documents.append(doc)
+        else:
+            # Fallback: สร้างข้อมูลจาก extracted_html/extracted_text แบบเก่า
+            extracted_html = result.get("extracted_html", "")
+            extracted_text = result.get("extracted_text", "")
+            page_htmls = result.get("page_htmls", [])
+            
+            # พยายามแยกข้อมูลจากข้อความ OCR
+            doc = {
+                "page_number": 1,
+                "วันที่": extract_field_from_text(extracted_text, "วันที่"),
+                "เลขที่": extract_field_from_text(extracted_text, "เลขที่"),
+                "พนักงานขาย": extract_field_from_text(extracted_text, "พนักงานขาย"),
+                "กำหนดชำระเงิน": extract_field_from_text(extracted_text, "กำหนดชำระเงิน"),
+                "ครบกำหนดวันที่": extract_field_from_text(extracted_text, "ครบกำหนดวันที่"),
+                "รวมเงิน": extract_field_from_text(extracted_text, "รวมเงิน"),
+                "ภาษีมูลค่าเพิ่ม": extract_field_from_text(extracted_text, "ภาษีมูลค่าเพิ่ม"),
+                "รวมสุทธิ": extract_field_from_text(extracted_text, "รวมสุทธิ"),
+                "has_error": False,
+                "error": ""
+            }
+            documents.append(doc)
+        
+        return jsonify({
+            "ok": True,
+            "documents": documents,
+            "total_pages": len(documents),
+            "elapsed_seconds": result.get("elapsed_seconds", 0),
+            "page_timings": result.get("page_timings", [])
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+def extract_field_from_text(text: str, field_name: str) -> str:
+    """แยกค่าจากข้อความ OCR แบบง่ายๆ"""
+    if not text:
+        return ""
+    
+    lines = text.split('\n')
+    for line in lines:
+        if field_name in line:
+            # หาค่าหลังจากชื่อฟิลด์
+            parts = line.split(field_name)
+            if len(parts) > 1:
+                value = parts[1].strip()
+                # ลบตัวอักษรพิเศษ
+                value = re.sub(r'^[:\s]+', '', value)
+                return value
+    return ""
+
+
+@app.route("/api/page-details", methods=["GET"])
+def page_details():
+    """ดึงข้อมูลแบบละเอียดของหน้าที่ระบุ"""
+    result_id = request.args.get("result_id", "").strip()
+    page_number = request.args.get("page_number", "").strip()
+    
+    print(f"[DEBUG] page_details called with result_id={result_id}, page_number={page_number}")
+    
+    if not result_id or not page_number:
+        return jsonify({"ok": False, "error": "ต้องระบุ result_id และ page_number"}), 400
+
+    result = get_ocr_result(result_id)
+    if not result:
+        return jsonify({"ok": False, "error": "ผลลัพธ์หมดอายุหรือไม่พบ"}), 404
+
+    try:
+        page_num = int(page_number)
+        page_results = result.get("page_results", [])
+        
+        print(f"[DEBUG] Requesting page {page_num}, total pages={len(page_results)}")
+        
+        if page_num < 1 or page_num > len(page_results):
+            return jsonify({"ok": False, "error": "หน้าที่ระบุไม่ถูกต้อง"}), 400
+        
+        page_result = page_results[page_num - 1]
+        
+        print(f"[DEBUG] Returning page_result with page_number={page_result.get('page_number')}, header={page_result.get('header', {}).get('เลขที่', 'N/A')}")
+        
+        return jsonify({
+            "ok": True,
+            "page_result": page_result
+        })
+    except ValueError:
+        return jsonify({"ok": False, "error": "page_number ต้องเป็นตัวเลข"}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/update-page-details", methods=["POST"])
+def update_page_details():
+    """อัปเดตข้อมูลของหน้าที่ระบุ"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"ok": False, "error": "ต้องส่ง JSON data"}), 400
+        
+        result_id = data.get("result_id", "").strip()
+        page_number = data.get("page_number")
+        page_result = data.get("page_result")
+        
+        if not result_id or page_number is None or not page_result:
+            return jsonify({"ok": False, "error": "ต้องระบุ result_id, page_number และ page_result"}), 400
+
+        result = get_ocr_result(result_id)
+        if not result:
+            return jsonify({"ok": False, "error": "ผลลัพธ์หมดอายุหรือไม่พบ"}), 404
+
+        try:
+            page_num = int(page_number)
+            page_results = result.get("page_results", [])
+            
+            if page_num < 1 or page_num > len(page_results):
+                return jsonify({"ok": False, "error": "หน้าที่ระบุไม่ถูกต้อง"}), 400
+            
+            # อัปเดตข้อมูลในหน้าที่ระบุ
+            page_results[page_num - 1] = page_result
+            result["page_results"] = page_results
+            
+            # เครื่องหมายว่าหน้านี้ถูกแก้ไขแล้ว (สำหรับ partial result)
+            if result.get("partial"):
+                edited_pages = result.get("edited_pages", set())
+                if isinstance(edited_pages, list):
+                    edited_pages = set(edited_pages)
+                edited_pages.add(page_num)
+                result["edited_pages"] = edited_pages
+                print(f"[DEBUG] Page {page_num} marked as edited in partial result {result_id}")
+            
+            # อัปเดตใน memory store
+            set_ocr_result(result_id, result)
+            
+            return jsonify({
+                "ok": True,
+                "message": "อัปเดตข้อมูลสำเร็จ"
+            })
+        except ValueError:
+            return jsonify({"ok": False, "error": "page_number ต้องเป็นตัวเลข"}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/upload/db/check", methods=["POST"])

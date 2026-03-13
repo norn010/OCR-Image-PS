@@ -99,11 +99,11 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
         }
         
         console.log('[DEBUG] Starting real-time auto-refresh interval');
-        // รีโหลดทุก 2 วินาที ขณะ OCR ยังทำงานอยู่
+        // รีโหลดทุก 5 วินาที ขณะ OCR ยังทำงานอยู่ (เพื่อลดการกระพริบสำหรับไฟล์หลายหน้า)
         const interval = setInterval(() => {
             console.log('[DEBUG] Auto-refreshing documents...');
             loadDocuments();
-        }, 2000);
+        }, 5000);
         
         return () => {
             console.log('[DEBUG] Clearing real-time refresh interval');
@@ -166,7 +166,8 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
             setSelectedPage(pageNumber);
             // เริ่มต้นข้อมูลที่แก้ไขจากข้อมูลเดิม
             setEditedHeader(data.page_result?.header || {});
-            setEditedDetail(data.page_result?.detail?.slice(1) || []); // ไม่รวม header row
+            // ให้แก้ไขได้ทุกแถว/ทุกช่อง (รวมแถวแรกด้วย)
+            setEditedDetail(data.page_result?.detail || []);
             setEditedTotal(data.page_result?.total || {});
             setHasEdits(false);
             setShowModal(true);
@@ -214,7 +215,7 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
         const updatedPageDetails = {
             ...pageDetails,
             header: editedHeader,
-            detail: pageDetails.detail ? [pageDetails.detail[0], ...editedDetail] : editedDetail,
+            detail: editedDetail,
             total: editedTotal
         };
         
@@ -439,15 +440,6 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
                                                 <h4 className="text-lg font-bold text-slate-900 mb-4 pb-2 border-b-2 border-slate-200">รายการสินค้า (แก้ไขได้)</h4>
                                                 <div className="overflow-x-auto">
                                                     <table className="min-w-full border-2 border-slate-300">
-                                                        <thead className="bg-gradient-to-r from-blue-50 to-indigo-50">
-                                                            <tr>
-                                                                {pageDetails.detail[0].map((header: any, index: number) => (
-                                                                    <th key={index} className="px-4 py-3 text-left text-xs font-bold text-slate-800 uppercase tracking-wider border-r border-slate-200 border-b">
-                                                                        {String(header)}
-                                                                    </th>
-                                                                ))}
-                                                            </tr>
-                                                        </thead>
                                                         <tbody className="divide-y divide-slate-200">
                                                             {editedDetail.map((row: any[], rowIndex: number) => (
                                                                 <tr key={rowIndex} className={rowIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>

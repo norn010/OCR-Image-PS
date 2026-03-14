@@ -69,8 +69,7 @@ export const UploadPanel: React.FC<UploadPanelProps> = ({
                 <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm">
                     <div className="font-semibold text-blue-700">
                         {status.status === "running"
-                            ? `กำลัง OCR หน้า ${currentStep || 1}/${totalSteps || 1} (หน้าเอกสาร ${status.current_page_number || 1
-                            })`
+                            ? status.message || `กำลัง OCR หน้า ${currentStep || 1}/${totalSteps || 1}`
                             : status.status === "completed"
                                 ? "OCR เสร็จแล้ว"
                                 : status.status === "error"
@@ -93,6 +92,11 @@ export const UploadPanel: React.FC<UploadPanelProps> = ({
                                 ? pageTimings.map((t) => (
                                     <li key={t.page_number}>
                                         หน้า {t.page_number}: {t.elapsed_seconds} วินาที
+                                        {(t as any).retry_count > 0 && (
+                                            <span className="ml-1 rounded bg-amber-100 px-1 text-amber-700 font-medium">
+                                                🔄 retry ×{(t as any).retry_count}
+                                            </span>
+                                        )}
                                     </li>
                                 ))
                                 : "ยังไม่มีข้อมูลเวลา"}

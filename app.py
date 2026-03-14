@@ -1585,10 +1585,13 @@ def call_typhoon_ocr(
                 progress_callback(page_index, total_pages, page_number)
             page_started = time.perf_counter()
 
+            # ตรวจสอบ native extraction ก่อน
             if use_native_extraction:
                 native_text, native_row_count = extract_native_page_content(file_path, page_number)
             else:
                 native_text, native_row_count = "", 0
+            
+            # ถ้า native extraction สำเร็จ ให้ข้าม OCR API
             if native_text and native_row_count > 0:
                 merged_texts.append(native_text)
                 per_page_texts.append(native_text)
@@ -1601,11 +1604,15 @@ def call_typhoon_ocr(
                     incremental_result_callback(page_index, total_pages, page_number, native_text, elapsed)
                 continue
 
+            # OCR API retry logic
             page_payload = json.dumps([page_number])
             last_error: Optional[Exception] = None
+            page_text = ""
+            retry_count = 0
+            max_retries = 3
 
             # Retry each page a few times to reduce transient misses/timeouts.
-            for _ in range(3):
+            for retry_count in range(max_retries):
                 try:
                     page_joined, page_results = call_typhoon_ocr_single_request(
                         file_path=file_path,
@@ -1622,15 +1629,35 @@ def call_typhoon_ocr(
                         page_text = page_results[0]
                     else:
                         page_text = page_joined
-                    merged_texts.append(page_text)
-                    per_page_texts.append(page_text)
-                    last_error = None
-                    break
+                    
+                    # ตรวจสอบว่าข้อมูลว่างหรือไม่
+                    if page_text and page_text.strip():
+                        print(f"[DEBUG] Page {page_number} OCR successful on attempt {retry_count + 1}")
+                        last_error = None
+                        break
+                    else:
+                        print(f"[DEBUG] Page {page_number} OCR returned empty text on attempt {retry_count + 1}")
+                        if retry_count < max_retries - 1:
+                            print(f"[DEBUG] Retrying page {page_number}... ({retry_count + 2}/{max_retries})")
+                            time.sleep(1)  # รอ 1 วินาทีก่อน retry
+                        else:
+                            print(f"[DEBUG] Page {page_number} failed after {max_retries} attempts, using empty result")
+                            page_text = ""  # ใช้ค่าว่างถ้า retry ครบแล้ว
+                            last_error = None
+                            break
+                        
                 except Exception as exc:
                     last_error = exc
+                    print(f"[DEBUG] Page {page_number} OCR error on attempt {retry_count + 1}: {exc}")
+                    if retry_count < max_retries - 1:
+                        print(f"[DEBUG] Retrying page {page_number} due to error... ({retry_count + 2}/{max_retries})")
+                        time.sleep(1)  # รอ 1 วินาทีก่อน retry
 
             if last_error is not None:
                 raise RuntimeError(f"OCR failed on page {page_number}: {last_error}") from last_error
+
+            merged_texts.append(page_text)
+            per_page_texts.append(page_text)
 
             elapsed = round(time.perf_counter() - page_started, 2)
             page_timings.append({"page_number": page_number, "elapsed_seconds": elapsed})
@@ -1963,6 +1990,7 @@ def run_ocr_pipeline(
     progress_callback: Optional[Callable[[int, int, int], None]] = None,
     page_done_callback: Optional[Callable[[int, int, int, float], None]] = None,
     incremental_result_callback: Optional[Callable[[int, dict], None]] = None,
+    retry_status_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> dict[str, Any]:
     temp_path = ""
     start_time = time.perf_counter()
@@ -1987,34 +2015,93 @@ def run_ocr_pipeline(
                 pages_value = list(range(1, page_count + 1))
             use_native = True
 
+        # เก็บ mapping page_number -> retried text สำหรับอัปเดต page_texts ภายหลัง
+        retried_page_texts: dict[int, str] = {}
+
+        def _field_is_missing(val: str) -> bool:
+            """True ถ้าค่าว่างหรือเป็น '-' ซึ่ง OCR มักใส่เมื่ออ่านไม่ได้"""
+            v = (val or "").strip()
+            return not v or v == "-"
+
         # สร้าง wrapper callback เพื่อประมวลผลข้อความเป็น structured data แบบ real-time
+        # พร้อม retry ทันทีถ้า เลขที่ หายไป ก่อนส่งผลไปยัง frontend
         def on_page_extracted(
-            page_index: int, 
-            total_pages: int, 
-            page_number: int, 
-            page_text: str, 
-            elapsed: float
+            page_index: int,
+            total_pages: int,
+            page_number: int,
+            page_text: str,
+            elapsed: float,
         ) -> None:
-            """ประมวลผลข้อความหน้าเดียวและส่งผลลัพธ์แบบ real-time"""
-            try:
-                page_html = render_ocr_html(page_text)
-                page_text_corrected = ensure_summary_spacing_in_text(
-                    correct_ocr_description_text(page_text)
-                )
-                page_html_corrected = render_ocr_html(page_text_corrected)
-                page_data = extract_ocr_tables_structured(page_html_corrected, page_text_corrected, [page_html_corrected])
-                page_result = {
+            """ประมวลผลข้อความหน้าเดียว — retry OCR ถ้า เลขที่ ว่าง/'-' — แล้วส่ง real-time"""
+            nonlocal retried_page_texts
+
+            MAX_INLINE_RETRY = 3
+
+            def _process(txt: str) -> tuple[dict, dict]:
+                """แปลง raw text → (page_data, page_result) dict"""
+                txt_c = ensure_summary_spacing_in_text(correct_ocr_description_text(txt))
+                html_c = render_ocr_html(txt_c)
+                data = extract_ocr_tables_structured(html_c, txt_c, [html_c])
+                result = {
                     "page_number": page_number,
-                    "header": page_data.get("header", {}),
-                    "detail": page_data.get("detail", []),
-                    "total": page_data.get("total", {}),
-                    "extracted_text": page_text_corrected,
-                    "extracted_html": page_html_corrected
+                    "header": data.get("header", {}),
+                    "detail": data.get("detail", []),
+                    "total": data.get("total", {}),
+                    "extracted_text": txt_c,
+                    "extracted_html": html_c,
                 }
+                return data, result
+
+            try:
+                data, page_result = _process(page_text)
+                best_text = ensure_summary_spacing_in_text(correct_ocr_description_text(page_text))
+
+                # ถ้า เลขที่ ว่างหรือ "-" ให้ retry OCR ซ้ำสูงสุด MAX_INLINE_RETRY ครั้ง
+                inv_no = data.get("header", {}).get("เลขที่", "")
+                if _field_is_missing(inv_no):
+                    print(f"[RETRY] Page {page_number}: เลขที่ missing ({repr(inv_no)}), retrying OCR...")
+                    for attempt in range(1, MAX_INLINE_RETRY + 1):
+                        # แจ้ง progress ของ retry ออกไป
+                        if retry_status_callback:
+                            retry_status_callback(page_number, attempt, MAX_INLINE_RETRY)
+                        try:
+                            retry_payload = json.dumps([page_number])
+                            retry_joined, retry_results = call_typhoon_ocr_single_request(
+                                file_path=temp_path,
+                                api_key=api_key,
+                                model=model,
+                                task_type=task_type,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                top_p=top_p,
+                                repetition_penalty=repetition_penalty,
+                                pages_json=retry_payload,
+                            )
+                            retry_raw = retry_results[0] if retry_results else retry_joined
+                            if retry_raw and retry_raw.strip():
+                                retry_data, retry_result = _process(retry_raw)
+                                retry_inv = (retry_data.get("header", {}).get("เลขที่", "") or "").strip()
+                                if retry_inv and retry_inv != "-":
+                                    print(f"[RETRY] Page {page_number} OK on attempt {attempt}: เลขที่={retry_inv}")
+                                    page_result = retry_result
+                                    best_text = retry_result["extracted_text"]
+                                    break
+                                else:
+                                    print(f"[RETRY] Page {page_number} attempt {attempt}: still missing ({repr(retry_inv)})")
+                            else:
+                                print(f"[RETRY] Page {page_number} attempt {attempt}: empty OCR response")
+                        except Exception as retry_exc:
+                            print(f"[RETRY] Page {page_number} attempt {attempt} error: {retry_exc}")
+                        if attempt < MAX_INLINE_RETRY:
+                            time.sleep(2)
+
+                # เก็บ text ที่ดีที่สุดสำหรับอัปเดต page_texts ในภายหลัง
+                retried_page_texts[page_number] = best_text
+
                 if incremental_result_callback:
                     incremental_result_callback(page_number, page_result)
+
             except Exception as e:
-                # ถ้าประมวลผลล้มเหลว ส่งผลลัพธ์แบบ error
                 page_result = {
                     "page_number": page_number,
                     "header": {},
@@ -2022,7 +2109,7 @@ def run_ocr_pipeline(
                     "total": {},
                     "extracted_text": page_text,
                     "extracted_html": "",
-                    "error": str(e)
+                    "error": str(e),
                 }
                 if incremental_result_callback:
                     incremental_result_callback(page_number, page_result)
@@ -2043,6 +2130,14 @@ def run_ocr_pipeline(
             use_native_extraction=use_native,
         )
 
+        # อัปเดต page_texts ด้วยข้อความที่ retry แล้ว (ถ้ามี) จาก on_page_extracted
+        # retried_page_texts มี key=page_number (1-based), value=corrected text
+        if retried_page_texts:
+            page_texts = [
+                retried_page_texts.get(i + 1) or pt
+                for i, pt in enumerate(page_texts)
+            ]
+
         # แก้คำที่ OCR อ่านผิดในรายละเอียด (เช่น ล้างอดีต→ล้างอัดฉีด, ฤดูฝน→ดูดฝุ่น)
         extracted_text = correct_ocr_description_text(extracted_text)
         page_texts = [correct_ocr_description_text(pt) for pt in page_texts]
@@ -2059,7 +2154,8 @@ def run_ocr_pipeline(
         ).decode("utf-8")
         elapsed_seconds = round(time.perf_counter() - start_time, 2)
 
-        # แยกข้อมูลแต่ละหน้าเพื่อสร้างผลลัพธ์สมบูรณ์ (ไม่ต้องส่ง real-time อีกแล้วเพราะส่งไปแล้วตอน OCR)
+        # สร้าง page_results จาก page_texts/page_htmls ที่ถูก retry แล้ว
+        # (retry ถูกทำแล้วใน on_page_extracted ก่อนส่ง real-time — ที่นี่แค่ build final list)
         page_results = []
         for i, (page_text, page_html) in enumerate(zip(page_texts, page_htmls)):
             try:
@@ -2070,20 +2166,19 @@ def run_ocr_pipeline(
                     "detail": page_data.get("detail", []),
                     "total": page_data.get("total", {}),
                     "extracted_text": page_text,
-                    "extracted_html": page_html
+                    "extracted_html": page_html,
                 }
                 page_results.append(page_result)
             except Exception as e:
-                page_result = {
+                page_results.append({
                     "page_number": i + 1,
                     "header": {},
                     "detail": [],
                     "total": {},
                     "extracted_text": page_text,
                     "extracted_html": page_html,
-                    "error": str(e)
-                }
-                page_results.append(page_result)
+                    "error": str(e),
+                })
 
         return {
             "extracted_text": extracted_text,
@@ -2095,7 +2190,7 @@ def run_ocr_pipeline(
             "page_htmls": page_htmls,
             "page_timings": page_timings,
             "elapsed_seconds": elapsed_seconds,
-            "page_results": page_results,  # เพิ่มผลลัพธ์แต่ละหน้า
+            "page_results": page_results,
         }
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -2214,6 +2309,10 @@ def run_ocr_job(job_id: str, params: dict[str, Any]) -> None:
             progress_callback=on_progress,
             page_done_callback=on_page_done,
             incremental_result_callback=on_page_result,
+            retry_status_callback=lambda pg, att, mx: update_ocr_job(
+                job_id,
+                message=f"กำลัง Re-OCR หน้า {pg} (ครั้งที่ {att}/{mx})",
+            ),
         )
         
         # Merge ข้อมูลที่แก้ไขแล้วจาก partial result เข้ากับผลลัพธ์สมบูรณ์

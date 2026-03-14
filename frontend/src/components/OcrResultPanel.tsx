@@ -83,12 +83,18 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
     const [editedTotal, setEditedTotal] = useState<Record<string, string>>({});
     const [hasEdits, setHasEdits] = useState(false);
 
+    const [viewedPages, setViewedPages] = useState<Set<number>>(new Set());
+
     // ดึงข้อมูลรายการเอกสารเมื่อมี resultId
     useEffect(() => {
         if (resultId) {
             loadDocuments();
+            // Reset viewed pages when loading a new document
+            setViewedPages(new Set());
         }
     }, [resultId]);
+
+    //... (kept for line reference, but not entirely replacing here, using a more targeted replace next)
 
     // รีโหลดข้อมูลแบบ real-time ขณะ OCR กำลังทำงาน
     useEffect(() => {
@@ -97,14 +103,14 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
             console.log('[DEBUG] Skipping real-time refresh - no resultId or status not running');
             return;
         }
-        
+
         console.log('[DEBUG] Starting real-time auto-refresh interval');
         // รีโหลดทุก 5 วินาที ขณะ OCR ยังทำงานอยู่ (เพื่อลดการกระพริบสำหรับไฟล์หลายหน้า)
         const interval = setInterval(() => {
             console.log('[DEBUG] Auto-refreshing documents...');
             loadDocuments();
         }, 5000);
-        
+
         return () => {
             console.log('[DEBUG] Clearing real-time refresh interval');
             clearInterval(interval);
@@ -121,7 +127,7 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
 
     async function loadDocuments() {
         if (!resultId) return;
-        
+
         console.log('Loading documents for resultId:', resultId);
         setIsLoadingDocuments(true);
         try {
@@ -129,12 +135,12 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
             console.log('Response status:', resp.status);
             const data = await resp.json();
             console.log('Response data:', data);
-            
+
             if (!resp.ok || !data.ok) {
                 console.error('ไม่สามารถโหลดข้อมูลได้:', data.error);
                 return;
             }
-            
+
             console.log('Documents loaded:', data.documents);
             setDocuments(data.documents || []);
         } catch (error) {
@@ -146,22 +152,22 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
 
     async function viewPageDetails(pageNumber: number) {
         if (!resultId) return;
-        
+
         console.log(`[DEBUG] Opening page details for page ${pageNumber}`);
-        
+
         try {
             const resp = await fetch(`/api/page-details?result_id=${resultId}&page_number=${pageNumber}`);
             const data = await resp.json();
-            
+
             console.log(`[DEBUG] Received page details:`, data);
-            
+
             if (!resp.ok || !data.ok) {
                 alert(`ไม่สามารถโหลดข้อมูลหน้า ${pageNumber} ได้: ${data.error}`);
                 return;
             }
-            
+
             console.log(`[DEBUG] Setting selectedPage to ${pageNumber}, pageDetails page_number=${data.page_result?.page_number}`);
-            
+
             setPageDetails(data.page_result);
             setSelectedPage(pageNumber);
             // เริ่มต้นข้อมูลที่แก้ไขจากข้อมูลเดิม
@@ -210,7 +216,7 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
 
     function saveEdits() {
         if (!pageDetails) return;
-        
+
         // อัปเดตข้อมูลใน pageDetails
         const updatedPageDetails = {
             ...pageDetails,
@@ -218,7 +224,7 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
             detail: editedDetail,
             total: editedTotal
         };
-        
+
         // ส่งข้อมูลที่แก้ไขไปยัง API เพื่ออัปเดต
         fetch('/api/update-page-details', {
             method: 'POST',
@@ -229,20 +235,20 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
                 page_result: updatedPageDetails
             })
         }).then(resp => resp.json())
-          .then(data => {
-              if (data.ok) {
-                  setPageDetails(updatedPageDetails);
-                  setHasEdits(false);
-                  alert('บันทึกการแก้ไขสำเร็จ');
-                  // รีโหลดรายการเอกสารเพื่ออัปเดต UI
-                  loadDocuments();
-              } else {
-                  alert(`ไม่สามารถบันทึกได้: ${data.error}`);
-              }
-          })
-          .catch(error => {
-              alert(`เกิดข้อผิดพลาด: ${error}`);
-          });
+            .then(data => {
+                if (data.ok) {
+                    setPageDetails(updatedPageDetails);
+                    setHasEdits(false);
+                    alert('บันทึกการแก้ไขสำเร็จ');
+                    // รีโหลดรายการเอกสารเพื่ออัปเดต UI
+                    loadDocuments();
+                } else {
+                    alert(`ไม่สามารถบันทึกได้: ${data.error}`);
+                }
+            })
+            .catch(error => {
+                alert(`เกิดข้อผิดพลาด: ${error}`);
+            });
     }
 
     if (!extractedHtml && !resultId) return null;
@@ -258,7 +264,7 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
                 <h2 className="text-xl font-semibold text-slate-900">
                     สรุปเอกสาร
                 </h2>
-                
+
                 {/* ส่วนอัปโหลดลงฐานข้อมูล */}
                 {resultId && (
                     <div className="flex items-center gap-2">
@@ -340,9 +346,20 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
                                             <td className="px-4 py-3 text-sm font-bold text-emerald-700 border-r border-slate-200">{doc.รวมสุทธิ || '-'}</td>
                                             <td className="px-4 py-3 text-sm text-center">
                                                 <button
-                                                    onClick={() => viewPageDetails(doc.page_number)}
-                                                    className="px-4 py-2 text-xs bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all transform hover:scale-105 shadow-md"
+                                                    onClick={() => {
+                                                        setViewedPages(prev => new Set(prev).add(doc.page_number));
+                                                        viewPageDetails(doc.page_number);
+                                                    }}
+                                                    className={`px-4 py-2 text-xs text-white rounded-lg transition-all transform hover:scale-105 shadow-md flex items-center justify-center gap-1 mx-auto ${viewedPages.has(doc.page_number)
+                                                            ? 'bg-gradient-to-r from-slate-600 to-slate-700 hover:from-slate-700 hover:to-slate-800'
+                                                            : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700'
+                                                        }`}
                                                 >
+                                                    {viewedPages.has(doc.page_number) && (
+                                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path>
+                                                        </svg>
+                                                    )}
                                                     ดูรายละเอียด
                                                 </button>
                                             </td>
@@ -410,7 +427,7 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
                                         </div>
                                     </div>
                                 )}
-                                
+
                                 {/* ด้านขวา: แบบฟอร์มแก้ไข - 3/5 ส่วน */}
                                 <div className={`${isPdfFile && pdfPreviewUrl ? 'lg:w-3/5' : 'w-full'} w-full p-6 overflow-y-auto bg-white`}>
                                     <div className="space-y-6">
@@ -488,6 +505,6 @@ export const OcrResultPanel: React.FC<OcrResultPanelProps> = ({
                 </div>
             )}
 
-            </section>
+        </section>
     );
 };
